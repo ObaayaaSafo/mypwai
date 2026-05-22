@@ -80,6 +80,16 @@ router.post('/students', async (req, res) => {
     const existing = (await query('SELECT id FROM students WHERE index_no = ?', [
       student.index_no,
     ])) as { id: number }[];
+
+    // Prevent creating/updating a student if it's been permanently deleted
+    try {
+      const deleted = (await query('SELECT index_no FROM deleted_students WHERE index_no = ?', [student.index_no])) as any[];
+      if (deleted && deleted.length > 0) {
+        return res.status(410).json({ message: 'This student was permanently deleted and cannot be recreated' });
+      }
+    } catch (e) {
+      // If table doesn't exist yet, proceed normally
+    }
     const faceEnrolled = resolveFaceEnrolled(student);
     const fingerprintEnrolled = resolveFingerprintEnrolled(student);
 
@@ -124,7 +134,13 @@ router.delete('/students/:index', async (req, res) => {
   const index = String(req.params?.index || '').trim();
 
   try {
+    // Permanently remove the student and record the deletion to prevent later re-import
     await exec('DELETE FROM students WHERE index_no = ?', [index]);
+    try {
+      await exec('INSERT INTO deleted_students (index_no) VALUES (?) ON DUPLICATE KEY UPDATE deleted_at = CURRENT_TIMESTAMP', [index]);
+    } catch (e) {
+      // If the deleted_students table doesn't exist yet (migration not run), ignore
+    }
     return res.json({ success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to delete student';
@@ -365,6 +381,16 @@ router.post('/import', async (req, res) => {
         const indexNo = String(s.index_no || s.index || '').trim();
         if (!indexNo) continue;
         try {
+          // Skip students that were permanently deleted
+          try {
+            const deleted = (await query('SELECT index_no FROM deleted_students WHERE index_no = ?', [indexNo])) as any[];
+            if (deleted && deleted.length > 0) {
+              result.duplicates.students++;
+              continue;
+            }
+          } catch (e) {
+            // ignore if table missing
+          }
           const existing = (await query('SELECT id FROM students WHERE index_no = ?', [indexNo])) as any[];
           if (existing.length > 0) {
             result.duplicates.students++;

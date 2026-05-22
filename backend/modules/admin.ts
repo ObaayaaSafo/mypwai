@@ -312,3 +312,39 @@ router.post('/invigilators/bulk-reset-passwords', async (req, res) => {
 });
 
 export default router;
+
+// ---------- MARK DELETED FROM EXPORT ----------
+// POST /api/admin/mark-deleted-from-export
+// Body: { students: [{ index_no|index: 'ID123', ... }, ...] }
+// Marks any student indices present in the provided export but missing from the live `students` table
+// as permanently deleted (inserts into `deleted_students`).
+router.post('/mark-deleted-from-export', async (req, res) => {
+  const students = req.body?.students;
+  if (!Array.isArray(students)) {
+    return res.status(400).json({ message: 'students array is required' });
+  }
+
+  let marked = 0;
+  const errors: string[] = [];
+
+  for (const s of students) {
+    const indexNo = String(s?.index_no ?? s?.index ?? '').trim();
+    if (!indexNo) continue;
+
+    try {
+      const found = (await query('SELECT id FROM students WHERE index_no = ? LIMIT 1', [indexNo])) as any[];
+      if (found.length === 0) {
+        try {
+          await exec('INSERT INTO deleted_students (index_no) VALUES (?) ON DUPLICATE KEY UPDATE deleted_at = CURRENT_TIMESTAMP', [indexNo]);
+          marked++;
+        } catch (e: any) {
+          errors.push(`${indexNo}: ${e?.message || 'insert failed'}`);
+        }
+      }
+    } catch (e: any) {
+      errors.push(`${indexNo}: ${e?.message || 'query failed'}`);
+    }
+  }
+
+  return res.json({ success: true, marked, errors });
+});
