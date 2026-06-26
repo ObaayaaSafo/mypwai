@@ -18,7 +18,7 @@ const capabilityCards = [
   {
     title: 'Attendance Intel',
     detail: 'Absences, hall coverage, late-arrival signals, and operational summaries.',
-    accent: '#0284C7',
+    accent: '#C9A84C',
   },
   {
     title: 'Anomaly Watch',
@@ -341,8 +341,8 @@ const AIAssistantPanel: React.FC = () => {
                   width: '44px',
                   height: '44px',
                   borderRadius: '16px',
-                  background: 'linear-gradient(145deg, #0EA5E9, #14B8A6)',
-                  color: '#FFFFFF',
+                  background: 'linear-gradient(145deg, #C9A84C, #A68A2E)',
+                  color: '#1a1a1a',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -420,9 +420,9 @@ const AIAssistantPanel: React.FC = () => {
                         borderRadius: '14px',
                         flexShrink: 0,
                         background: isAssistant
-                          ? 'linear-gradient(145deg, #0EA5E9, #14B8A6)'
-                          : 'linear-gradient(145deg, #1D4ED8, #4338CA)',
-                        color: '#FFFFFF',
+                          ? 'linear-gradient(145deg, #C9A84C, #A68A2E)'
+                          : 'linear-gradient(145deg, #C9A84C, #A68A2E)',
+                        color: '#1a1a1a',
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
@@ -440,7 +440,7 @@ const AIAssistantPanel: React.FC = () => {
                         style={{
                           padding: '0.95rem 1rem',
                           borderRadius: isAssistant ? '20px 20px 20px 8px' : '20px 20px 8px 20px',
-                          background: isAssistant ? '#FFFFFF' : 'linear-gradient(145deg, #1D4ED8, #4338CA)',
+                          background: isAssistant ? '#FFFFFF' : 'linear-gradient(145deg, #C9A84C, #A68A2E)',
                           color: isAssistant ? '#0F172A' : '#FFFFFF',
                           border: isAssistant ? '1px solid #E2E8F0' : 'none',
                           boxShadow: isAssistant
@@ -476,8 +476,8 @@ const AIAssistantPanel: React.FC = () => {
                     width: '38px',
                     height: '38px',
                     borderRadius: '14px',
-                    background: 'linear-gradient(145deg, #0EA5E9, #14B8A6)',
-                    color: '#FFFFFF',
+                    background: 'linear-gradient(145deg, #C9A84C, #A68A2E)',
+                    color: '#1a1a1a',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
@@ -564,8 +564,8 @@ const AIAssistantPanel: React.FC = () => {
                   borderRadius: '16px',
                   background: loading
                     ? 'linear-gradient(145deg, #94A3B8, #64748B)'
-                    : 'linear-gradient(145deg, #0EA5E9, #14B8A6)',
-                  color: '#FFFFFF',
+                    : 'linear-gradient(145deg, #C9A84C, #A68A2E)',
+                  color: '#1a1a1a',
                   padding: '0.9rem 1.2rem',
                   fontWeight: 800,
                   cursor: loading ? 'not-allowed' : 'pointer',
