@@ -3,6 +3,10 @@ import { initDB, persistDBBackup } from './db';
 const hasPhoto = (photo?: string | null) => typeof photo === 'string' && photo.trim().length > 0;
 
 const attendanceBases = [
+  `/api/attendance`,
+  `${window.location.protocol}//${window.location.hostname}:4007/api/attendance`,
+  'http://127.0.0.1:4007/api/attendance',
+  'http://localhost:4007/api/attendance',
   `${window.location.protocol}//${window.location.hostname}:4000/api/attendance`,
   'http://127.0.0.1:4000/api/attendance',
   'http://localhost:4000/api/attendance',
@@ -61,14 +65,12 @@ export const fetchStudents = async () => {
 
 export const addStudent = async (student: any) => {
   try {
-    // convert to backend field names
+    // convert to backend field names (biometric flags managed separately)
     const payload = {
       index_no: student.index,
       name: student.name,
       programme: student.programme,
       level: student.level,
-      fingerprint_enrolled: student.fingerprintEnrolled ?? false,
-      face_enrolled: student.faceEnrolled ?? hasPhoto(student.photo),
       photo_url: student.photo ?? null,
     };
 

@@ -94,15 +94,13 @@ router.post('/students', async (req, res) => {
     const fingerprintEnrolled = resolveFingerprintEnrolled(student);
 
     if (existing.length > 0) {
-      // Update existing
+      // Update existing (don't overwrite biometric flags managed by fingerprint module)
       await exec(
-        'UPDATE students SET name = ?, programme = ?, level = ?, fingerprint_enrolled = ?, face_enrolled = ?, photo_url = ? WHERE index_no = ?',
+        'UPDATE students SET name = ?, programme = ?, level = ?,  photo_url = ? WHERE index_no = ?',
         [
           student.name,
           student.programme || null,
           student.level || null,
-          fingerprintEnrolled,
-          faceEnrolled,
           student.photo_url || null,
           student.index_no,
         ]
@@ -394,14 +392,13 @@ router.post('/import', async (req, res) => {
           const existing = (await query('SELECT id FROM students WHERE index_no = ?', [indexNo])) as any[];
           if (existing.length > 0) {
             result.duplicates.students++;
+            // Don't overwrite biometric flags — managed by fingerprint module
             await exec(
-              `UPDATE students SET name=?, programme=?, level=?, fingerprint_enrolled=?, face_enrolled=?, photo_url=? WHERE index_no=?`,
+              `UPDATE students SET name=?, programme=?, level=?, photo_url=? WHERE index_no=?`,
               [
                 s.name || 'Unknown',
                 s.programme || null,
                 s.level || null,
-                s.fingerprint_enrolled ?? s.fingerprintEnrolled ?? false,
-                s.face_enrolled ?? s.faceEnrolled ?? false,
                 s.photo_url || s.photo || null,
                 indexNo,
               ]

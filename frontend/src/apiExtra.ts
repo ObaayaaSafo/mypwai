@@ -401,6 +401,20 @@ export const verifyAttendance = async (studentId?: string, fingerprintData?: str
 
   const resolvedMethod: 'fingerprint' | 'face' = method || 'fingerprint';
 
+  // Use the real fingerprint backend when biometric data is available
+  if (resolvedMethod === 'fingerprint' && fingerprintData) {
+    try {
+      const response = await requestFingerprint('/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ templateBase64: fingerprintData }),
+      });
+      return response.json();
+    } catch (error) {
+      // Fall through to offline fallback
+    }
+  }
+
   try {
     const response = await requestAttendance('/verify', {
       method: 'POST',
@@ -459,8 +473,63 @@ export const verifyAttendance = async (studentId?: string, fingerprintData?: str
   }
 };
 
+const fingerprintCandidateBases = [
+  '/api/fingerprint',
+  'http://127.0.0.1:4007/api/fingerprint',
+  'http://127.0.0.1:4000/api/fingerprint',
+  'http://localhost:4007/api/fingerprint',
+  'http://localhost:4000/api/fingerprint',
+];
+
+const requestFingerprint = async (path: string, init?: RequestInit) => {
+  let lastError: Error | null = null;
+  const token = localStorage.getItem('authToken');
+
+  for (const base of fingerprintCandidateBases) {
+    const url = `${trimTrailingSlash(base)}${path}`;
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...(init?.headers as Record<string, string> || {}),
+      };
+      if (token && !headers.Authorization && !headers.authorization) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+
+      const response = await fetch(url, { ...init, headers });
+      if (!response.ok) {
+        let detail = `Fingerprint request failed with status ${response.status}`;
+        try {
+          const body = await response.json();
+          if (body?.message) detail = body.message;
+          else if (body?.error) detail = body.error;
+        } catch {
+          try { const text = await response.text(); if (text) detail = text; } catch {}
+        }
+        throw new Error(detail);
+      }
+      return response;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error('Network request failed');
+    }
+  }
+  throw lastError || new Error('Unable to reach backend fingerprint API');
+};
+
 export const enrollFingerprint = async (studentId: string, fingerprintData?: string) => {
   try {
+    // If we have a real capture, call the real fingerprint backend
+    if (fingerprintData) {
+      // Send the already-captured template so the backend doesn't scan again.
+      const res = await requestFingerprint('/enroll', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ studentId, templateBase64: fingerprintData }),
+      });
+      return res.json();
+    }
+
+    // Fallback: mark enrolled locally via attendance API
     const studentsRes = await requestAttendance('/students');
     const students = await studentsRes.json();
     const student = (Array.isArray(students) ? students : []).find((entry: any) => entry.index === studentId);

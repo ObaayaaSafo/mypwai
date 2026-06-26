@@ -13,6 +13,7 @@ const SYNC_INTERVAL_MS = 30000; // Check every 30 seconds
 const BACKEND_CHECK_ENDPOINT = '/api/health';
 const BACKEND_CHECK_ALTERNATES = [
   '/api/attendance/students',
+  '/api/fingerprint/status',
   'http://127.0.0.1:4007/api/health',
   'http://127.0.0.1:4007/api/attendance/students',
   'http://localhost:4007/api/health',
@@ -130,8 +131,6 @@ export async function syncToMySQL(): Promise<SyncEvent> {
       name: s.name,
       programme: s.programme,
       level: s.level,
-      fingerprint_enrolled: s.fingerprintEnrolled ?? s.fingerprint_enrolled ?? false,
-      face_enrolled: s.faceEnrolled ?? s.face_enrolled ?? false,
       photo_url: s.photo || null,
     }));
     
