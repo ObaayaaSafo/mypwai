@@ -1,3 +1,5 @@
+// Index: ScannerService.init():47 | shutdown():54 | probeConnection():60 | connect():69 | getDeviceInfo():74
+//        capture():87 | verify():98 | enroll():106 | getEnrolledStudents():111 | deleteTemplate():116 | reloadTemplates():122
 export type ScannerDeviceInfo = {
   deviceId: string;
   model: string;
@@ -14,195 +16,109 @@ export type FingerprintCapture = {
   captureTime: string;
 };
 
-type BrowserDevice = {
-  productName?: string;
-  manufacturerName?: string;
-  serialNumber?: string;
-  vendorId?: number;
-  productId?: number;
-  opened?: boolean;
-  open?: () => Promise<void>;
-  close?: () => Promise<void>;
-};
+// ── Backend API helpers ──
 
-type BrowserNavigator = Navigator & {
-  hid?: {
-    getDevices: () => Promise<BrowserDevice[]>;
-    requestDevice: (options: { filters: Array<Record<string, never>> }) => Promise<BrowserDevice[]>;
-  };
-  usb?: {
-    getDevices: () => Promise<BrowserDevice[]>;
-    requestDevice: (options: { filters: Array<Record<string, never>> }) => Promise<BrowserDevice>;
-  };
-  serial?: {
-    getPorts: () => Promise<BrowserDevice[]>;
-    requestPort: (options: { filters: Array<Record<string, never>> }) => Promise<BrowserDevice>;
-  };
-};
+const API_BASE = `${window.location.protocol}//${window.location.hostname}:4007/api/fingerprint`;
 
-type ConnectedScanner = {
-  device: BrowserDevice;
-  info: ScannerDeviceInfo;
-};
-
-const fingerprintKeywords = [
-  'finger',
-  'fingerprint',
-  'biometric',
-  'digitalpersona',
-  'u.are.u',
-  'mantra',
-  'morpho',
-  'secugen',
-  'suprema',
-  'nitgen',
-  'futronic',
-  'zkteco',
-];
-
-let connectedScanner: ConnectedScanner | null = null;
-
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const randomQuality = () => 82 + Math.floor(Math.random() * 16);
-
-const isFingerprintDevice = (device: BrowserDevice) => {
-  const label = `${device.productName || ''} ${device.manufacturerName || ''}`.toLowerCase();
-  return fingerprintKeywords.some((keyword) => label.includes(keyword));
-};
-
-const buildInfo = (device: BrowserDevice, connectionType: 'hid' | 'usb' | 'serial'): ScannerDeviceInfo => ({
-  deviceId: device.serialNumber || `${device.vendorId || '0000'}-${device.productId || '0000'}`,
-  model: device.productName || 'Fingerprint Scanner',
-  firmware: 'Browser-managed device',
-  status: 'ready',
-  lastCalibration: 'Hardware-managed',
-  connectionType,
-});
-
-const rememberDevice = (device: BrowserDevice, connectionType: 'hid' | 'usb' | 'serial') => {
-  connectedScanner = {
-    device,
-    info: buildInfo(device, connectionType),
-  };
-  return connectedScanner.info;
-};
-
-const browserNavigator = () => navigator as BrowserNavigator;
-
-const probeGrantedDevices = async () => {
-  const nav = browserNavigator();
-
-  if (nav.hid) {
-    const hidDevices = await nav.hid.getDevices();
-    const match = hidDevices.find(isFingerprintDevice);
-    if (match) return rememberDevice(match, 'hid');
+const apiCall = async (path: string, options?: RequestInit) => {
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Request failed: ${res.status}`);
   }
-
-  if (nav.usb) {
-    const usbDevices = await nav.usb.getDevices();
-    const match = usbDevices.find(isFingerprintDevice);
-    if (match) return rememberDevice(match, 'usb');
-  }
-
-  if (nav.serial) {
-    const serialDevices = await nav.serial.getPorts();
-    const match = serialDevices.find(isFingerprintDevice);
-    if (match) return rememberDevice(match, 'serial');
-  }
-
-  connectedScanner = null;
-  return null;
+  return res.json();
 };
 
-const requestFingerprintDevice = async () => {
-  const nav = browserNavigator();
+// ── Service ──
 
-  if (nav.hid) {
-    const devices = await nav.hid.requestDevice({ filters: [] });
-    const match = devices.find(isFingerprintDevice);
-    if (match) return rememberDevice(match, 'hid');
-  }
-
-  if (nav.usb) {
-    try {
-      const device = await nav.usb.requestDevice({ filters: [] });
-      if (isFingerprintDevice(device)) {
-        return rememberDevice(device, 'usb');
-      }
-    } catch (error) {
-      if (nav.hid || nav.serial) {
-        // Keep trying other browser APIs if the chooser is canceled or no match found.
-      } else {
-        throw error;
-      }
-    }
-  }
-
-  if (nav.serial) {
-    try {
-      const port = await nav.serial.requestPort({ filters: [] });
-      if (isFingerprintDevice(port)) {
-        return rememberDevice(port, 'serial');
-      }
-    } catch (error) {
-      if (!nav.hid && !nav.usb) {
-        throw error;
-      }
-    }
-  }
-
-  connectedScanner = null;
-  throw new Error('No fingerprint scanner was selected. Connect a fingerprint sensor and choose it from the browser prompt.');
-};
+let initialized = false;
+let connected = false;
 
 export const ScannerService = {
-  isBrowserSupported: () => {
-    const nav = browserNavigator();
-    return Boolean(nav.hid || nav.usb || nav.serial);
+  isBrowserSupported: () => true, // Browser just needs fetch — backend handles the hardware
+
+  /** Initialize backend fingerprint subsystem */
+  init: async (): Promise<void> => {
+    if (initialized) return;
+    const result = await apiCall('/init', { method: 'POST' });
+    initialized = true;
+    connected = result.deviceCount > 0;
+  },
+
+  /** Shutdown backend fingerprint subsystem */
+  shutdown: async (): Promise<void> => {
+    await apiCall('/shutdown', { method: 'POST' });
+    initialized = false;
+    connected = false;
   },
 
   probeConnection: async (): Promise<boolean> => {
-    const device = await probeGrantedDevices();
-    return Boolean(device);
+    try {
+      const status = await apiCall('/status');
+      connected = status.ready && status.deviceOpen;
+      return connected;
+    } catch {
+      connected = false;
+      return false;
+    }
   },
 
   connect: async (): Promise<boolean> => {
-    if (!ScannerService.isBrowserSupported()) {
-      connectedScanner = null;
-      throw new Error('This browser cannot talk to hardware scanners. Use a Chromium-based browser with WebHID, WebUSB, or Web Serial enabled.');
-    }
-
-    const existing = await probeGrantedDevices();
-    if (existing) {
-      return true;
-    }
-
-    await requestFingerprintDevice();
-    return true;
+    await ScannerService.init();
+    return ScannerService.probeConnection();
   },
 
   getDeviceInfo: async (): Promise<ScannerDeviceInfo> => {
-    const existing = connectedScanner?.info || (await probeGrantedDevices());
-    if (!existing) {
-      throw new Error('No fingerprint scanner connected');
-    }
-    return existing;
+    const status = await apiCall('/status');
+    return {
+      deviceId: 'zk-finger-scanner',
+      model: 'ZKTeco Fingerprint Scanner',
+      firmware: 'ZKFinger SDK 5.3',
+      status: status.ready && status.deviceOpen ? 'ready' : 'offline',
+      lastCalibration: 'Hardware-managed',
+      connectionType: 'usb',
+    };
   },
 
+  /** Capture fingerprint and receive template as base64 */
   capture: async (): Promise<FingerprintCapture> => {
-    const existing = connectedScanner?.info || (await probeGrantedDevices());
-    if (!existing) {
-      throw new Error('No fingerprint scanner connected');
-    }
-
-    await wait(1600);
-
+    const result = await apiCall('/capture', { method: 'POST' });
     return {
-      template: `fingerprint_template_${Date.now()}_${existing.deviceId}`,
-      quality: randomQuality(),
+      template: result.templateBase64 || '',
+      quality: 85,
       fingerLabel: 'Right thumb',
       captureTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
+  },
+
+  /** Verify a fingerprint against enrolled templates */
+  verify: async (): Promise<{
+    matched: boolean;
+    student?: { index: string; name: string; programme: string; level: string };
+    score?: number;
+    message?: string;
+  }> => {
+    return apiCall('/verify', { method: 'POST' });
+  },
+
+  /** Enroll a student's fingerprint */
+  enroll: async (studentId: string): Promise<{ success: boolean; message: string }> => {
+    return apiCall('/enroll', { method: 'POST', body: JSON.stringify({ studentId }) });
+  },
+
+  getEnrolledStudents: async (): Promise<Array<{ index_no: string; name: string }>> => {
+    return apiCall('/enrolled');
+  },
+
+  deleteTemplate: async (studentId: string): Promise<void> => {
+    await apiCall(`/template/${encodeURIComponent(studentId)}`, { method: 'DELETE' });
+  },
+
+  reloadTemplates: async (): Promise<number> => {
+    const result = await apiCall('/reload', { method: 'POST' });
+    return result.templateCount;
   },
 };

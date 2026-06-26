@@ -27,32 +27,32 @@ const candidateBases = explicitBase
   : [
       '/api/ai',
       'http://127.0.0.1:4007/api/ai',
-      `${window.location.protocol}//${window.location.hostname}:4000/api/ai`,
       'http://127.0.0.1:4000/api/ai',
+      'http://localhost:4007/api/ai',
       'http://localhost:4000/api/ai',
     ];
 
 const adminCandidateBases = [
   '/api/admin',
   'http://127.0.0.1:4007/api/admin',
-  `${window.location.protocol}//${window.location.hostname}:4000/api/admin`,
   'http://127.0.0.1:4000/api/admin',
+  'http://localhost:4007/api/admin',
   'http://localhost:4000/api/admin',
 ];
 
 const authCandidateBases = [
   '/api/auth',
   'http://127.0.0.1:4007/api/auth',
-  `${window.location.protocol}//${window.location.hostname}:4000/api/auth`,
   'http://127.0.0.1:4000/api/auth',
+  'http://localhost:4007/api/auth',
   'http://localhost:4000/api/auth',
 ];
 
 const attendanceCandidateBases = [
   '/api/attendance',
   'http://127.0.0.1:4007/api/attendance',
-  `${window.location.protocol}//${window.location.hostname}:4000/api/attendance`,
   'http://127.0.0.1:4000/api/attendance',
+  'http://localhost:4007/api/attendance',
   'http://localhost:4000/api/attendance',
 ];
 
