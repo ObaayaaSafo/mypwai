@@ -155,7 +155,12 @@ router.delete('/students/:index', async (req, res) => {
 
 router.get('/sessions', async (_req, res) => {
   try {
-    const sessions = await query('SELECT * FROM sessions');
+    const sessions = await query(`
+      SELECT s.*, sl.locked_by, sl.locked_at
+      FROM sessions s
+      LEFT JOIN session_locks sl ON sl.session_id = s.id
+      ORDER BY s.session_date DESC, s.session_time ASC
+    `);
     res.json(sessions);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to fetch sessions';
@@ -165,29 +170,64 @@ router.get('/sessions', async (_req, res) => {
 
 router.post('/sessions', async (req, res) => {
   const session = req.body as Session;
-  if (!session?.course_code || !session?.session_date || !session?.session_time) {
+  // Normalize course code to uppercase
+  const courseCode = (session.course_code || '').toUpperCase();
+  if (!courseCode || !session?.session_date || !session?.session_time) {
     return res.status(400).json({ message: 'course_code, session_date, and session_time are required' });
   }
 
   try {
+    let generatedId = session.id || 0;
     if (session.id) {
-      // Update existing
       await exec(
-        'UPDATE sessions SET course = ?, course_code = ?, session_date = ?, session_time = ?, hall = ? WHERE id = ?',
-        [session.course || null, session.course_code, session.session_date, session.session_time, session.hall || null, session.id]
+        'INSERT INTO sessions (id, course, course_code, session_date, session_time, hall) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE course = VALUES(course), course_code = VALUES(course_code), session_date = VALUES(session_date), session_time = VALUES(session_time), hall = VALUES(hall)',
+        [session.id, session.course || null, courseCode, session.session_date, session.session_time, session.hall || null]
       );
     } else {
-      // Insert new
-      await exec(
+      const result = await exec(
         'INSERT INTO sessions (course, course_code, session_date, session_time, hall) VALUES (?, ?, ?, ?, ?)',
-        [session.course || null, session.course_code, session.session_date, session.session_time, session.hall || null]
-      );
+        [session.course || null, courseCode, session.session_date, session.session_time, session.hall || null]
+      ) as any;
+      generatedId = result?.insertId || 0;
     }
 
-    return res.json({ success: true, session });
+    return res.json({ success: true, session: { ...session, id: generatedId, course_code: courseCode } });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to save session';
     res.status(500).json({ message });
+  }
+});
+
+/**
+ * DELETE /api/attendance/attendance?courseCode=X&date=Y
+ * Clear attendance records for a course on a specific date
+ */
+router.delete('/attendance', async (req, res) => {
+  try {
+    const courseCode = typeof req.query.courseCode === 'string' ? req.query.courseCode.trim() : '';
+    const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
+    const sessionId = typeof req.query.sessionId === 'string' ? Number(req.query.sessionId.trim()) : NaN;
+    if ((!courseCode || !date) && !sessionId) {
+      return res.status(400).json({ message: 'courseCode and date are required, or sessionId' });
+    }
+    let attResult: any, scanResult: any;
+    if (sessionId && !isNaN(sessionId)) {
+      attResult = await exec('DELETE FROM attendance WHERE session_id = ?', [sessionId]) as any;
+      scanResult = await exec('DELETE FROM scan_events WHERE session_id = ?', [sessionId]) as any;
+      // Also clean legacy records
+      await exec('DELETE FROM attendance WHERE session_id IS NULL AND course_code = ? AND attendance_date = ?', [courseCode, date]);
+      await exec('DELETE FROM scan_events WHERE session_id IS NULL AND course_code = ? AND event_date = ?', [courseCode, date]);
+    } else {
+      attResult = await exec('DELETE FROM attendance WHERE course_code = ? AND attendance_date = ?', [courseCode, date]) as any;
+      scanResult = await exec('DELETE FROM scan_events WHERE course_code = ? AND event_date = ?', [courseCode, date]) as any;
+    }
+    res.json({ 
+      success: true, 
+      attendanceDeleted: attResult?.affectedRows || 0,
+      scanEventsDeleted: scanResult?.affectedRows || 0
+    });
+  } catch (error) {
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed' });
   }
 });
 
@@ -195,8 +235,42 @@ router.delete('/sessions/:id', async (req, res) => {
   const id = Number(req.params?.id);
 
   try {
+    // Get session details before deleting
+    const sessions = await query('SELECT course_code, session_date FROM sessions WHERE id = ?', [id]) as { course_code: string; session_date: string }[];
+    if (sessions.length === 0) return res.status(404).json({ message: 'Session not found' });
+
+    const sessionRow = sessions[0]!;
+    const courseCode = sessionRow.course_code;
+    const sessionDate = sessionRow.session_date;
+
+    // Delete the session (FKs on session_locks, attendance.session_id, scan_events.session_id will cascade or set NULL)
     await exec('DELETE FROM sessions WHERE id = ?', [id]);
-    return res.json({ success: true });
+
+    // Delete session lock explicitly (has ON DELETE CASCADE on FK)
+    await exec('DELETE FROM session_locks WHERE session_id = ?', [id]);
+
+    // Delete attendance + scan events by session_id (precise cascade)
+    const attResult = await exec('DELETE FROM attendance WHERE session_id = ?', [id]) as any;
+    const scanResult = await exec('DELETE FROM scan_events WHERE session_id = ?', [id]) as any;
+
+    // Also clean up any legacy records (no session_id) that match this course+date
+    const attLegacy = await exec('DELETE FROM attendance WHERE session_id IS NULL AND course_code = ? AND attendance_date = ?', [courseCode, sessionDate]) as any;
+    const scanLegacy = await exec('DELETE FROM scan_events WHERE session_id IS NULL AND course_code = ? AND event_date = ?', [courseCode, sessionDate]) as any;
+
+    // If no other sessions exist for this course, clean up enrollments too
+    const remaining = await query('SELECT COUNT(*) as cnt FROM sessions WHERE course_code = ?', [courseCode]) as any[];
+    let enrollmentsCleared = 0;
+    if (remaining[0]?.cnt === 0) {
+      const enrollResult = await exec('DELETE FROM student_courses WHERE course_code = ?', [courseCode]) as any;
+      enrollmentsCleared = enrollResult?.affectedRows || 0;
+    }
+
+    res.json({
+      success: true,
+      attendanceDeleted: (attResult?.affectedRows || 0) + (attLegacy?.affectedRows || 0),
+      scanEventsDeleted: (scanResult?.affectedRows || 0) + (scanLegacy?.affectedRows || 0),
+      enrollmentsCleared,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to delete session';
     res.status(500).json({ message });
@@ -221,8 +295,8 @@ router.post('/attendance', async (req, res) => {
 
   try {
     await exec(
-      'INSERT INTO attendance (student_id, course_code, attendance_date, attendance_time, status) VALUES (?, ?, ?, ?, ?)',
-      [record.student_id, record.course_code, record.attendance_date, record.attendance_time, record.status || 'Present']
+      'INSERT INTO attendance (student_id, course_code, session_id, attendance_date, attendance_time, status) VALUES (?, ?, ?, ?, ?, ?)',
+      [record.student_id, record.course_code, (record as any).session_id || null, record.attendance_date, record.attendance_time, record.status || 'Present']
     );
 
     return res.json({ success: true });
@@ -331,8 +405,9 @@ router.get('/malpractice-summary', async (req, res) => {
 
       const type = parts.malpractice || 'unknown';
       const severity = (parts.severity || 'low') as string;
-      byType[type] = (byType[type] || 0) + 1;
-      if (severity in bySeverity) bySeverity[severity]++;
+      const current = byType[type];
+      byType[type] = (current !== undefined ? current : 0) + 1;
+      if (severity in bySeverity) bySeverity[severity] = (bySeverity[severity] ?? 0) + 1;
     });
 
     res.json({
@@ -399,7 +474,7 @@ router.post('/verify', async (req, res) => {
     // Check enrollment based on method
     if (method === 'fingerprint' && !resolveFingerprintEnrolled(student)) {
       await exec(
-        'INSERT INTO scan_events (student_id, course_code, event_date, event_time, result, reason) VALUES (?, ?, ?, ?, ?)',
+        'INSERT INTO scan_events (student_id, course_code, event_date, event_time, result, reason) VALUES (?, ?, ?, ?, ?, ?)',
         [student.id, null, todayIso(), nowTime(), 'failed', 'fingerprint_not_enrolled']
       );
       return res.status(400).json({ message: 'Fingerprint not enrolled' });
@@ -407,18 +482,32 @@ router.post('/verify', async (req, res) => {
 
     if (method === 'face' && !resolveFaceEnrolled(student)) {
       await exec(
-        'INSERT INTO scan_events (student_id, course_code, event_date, event_time, result, reason) VALUES (?, ?, ?, ?, ?)',
+        'INSERT INTO scan_events (student_id, course_code, event_date, event_time, result, reason) VALUES (?, ?, ?, ?, ?, ?)',
         [student.id, null, todayIso(), nowTime(), 'failed', 'face_not_enrolled']
       );
       return res.status(403).json({ message: `Face not enrolled for ${student.name}` });
     }
 
     const todaySession = (await query(
-      'SELECT course_code FROM sessions WHERE session_date = ? LIMIT 1',
+      'SELECT id, course_code FROM sessions WHERE session_date = ? LIMIT 1',
       [todayIso()]
-    )) as { course_code: string }[];
+    )) as { id: number; course_code: string }[];
 
     const courseCode = todaySession[0]?.course_code || 'DEMO101';
+    const sessionId = todaySession[0]?.id || null;
+
+    // Check course enrollment
+    try {
+      const enrollment = await query(
+        'SELECT 1 FROM student_courses WHERE student_id = ? AND course_code = ? LIMIT 1',
+        [student.id, courseCode]
+      ) as any[];
+      if (enrollment.length === 0) {
+        return res.status(403).json({ message: `${student.name} (${student.index_no}) is not enrolled in ${courseCode}` });
+      }
+    } catch {
+      // student_courses table may not exist — allow attendance anyway
+    }
 
     // Check for duplicate attendance
     const duplicates = (await query(
@@ -437,12 +526,12 @@ router.post('/verify', async (req, res) => {
     // Record attendance using transaction
     await transaction(async (conn) => {
       await conn.execute(
-        'INSERT INTO attendance (student_id, course_code, attendance_date, attendance_time, status) VALUES (?, ?, ?, ?, ?)',
-        [student.id, courseCode, todayIso(), nowTime(), 'Present']
+        'INSERT INTO attendance (student_id, course_code, session_id, attendance_date, attendance_time, status) VALUES (?, ?, ?, ?, ?, ?)',
+        [student.id, courseCode, sessionId ?? null, todayIso(), nowTime(), 'Present'] as any
       );
       await conn.execute(
-        'INSERT INTO scan_events (student_id, course_code, event_date, event_time, result) VALUES (?, ?, ?, ?, ?)',
-        [student.id, courseCode, todayIso(), nowTime(), 'success']
+        'INSERT INTO scan_events (student_id, course_code, session_id, event_date, event_time, result) VALUES (?, ?, ?, ?, ?, ?)',
+        [student.id, courseCode, sessionId ?? null, todayIso(), nowTime(), 'success'] as any
       );
     });
 
@@ -597,8 +686,8 @@ router.post('/import', async (req, res) => {
             result.duplicates.attendance++;
           } else {
             await exec(
-              `INSERT INTO attendance (student_id, course_code, attendance_date, attendance_time, status) VALUES (?,?,?,?,?)`,
-              [studentIdNum, courseCode, attDate, attTime, status]
+              `INSERT INTO attendance (student_id, course_code, session_id, attendance_date, attendance_time, status) VALUES (?,?,?,?,?,?)`,
+              [studentIdNum, courseCode, (a as any).session_id || null, attDate, attTime, status]
             );
             result.added.attendance++;
           }
@@ -623,29 +712,60 @@ router.post('/import', async (req, res) => {
  */
 router.get('/reports', async (req, res) => {
   try {
-    const courseCode = typeof req.query.courseCode === 'string' ? req.query.courseCode.trim() : '';
-    const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
+    let courseCode = typeof req.query.courseCode === 'string' ? req.query.courseCode.trim() : '';
+    let date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId.trim() : '';
 
-    // Require a course code — without it, records from different courses get mixed
-    if (!courseCode) {
-      return res.json([]);
+    // Resolve courseCode/date from session if sessionId provided
+    let sessionDate: string = '';
+    if (sessionId) {
+      try {
+        const sessionRows = await query(
+          'SELECT course_code, session_date FROM sessions WHERE id = ?',
+          [Number(sessionId)]
+        ) as { course_code: string; session_date: string }[];
+        if (sessionRows.length > 0) {
+          const sr = sessionRows[0]!;
+          if (!courseCode) courseCode = (sr.course_code || '').toUpperCase();
+          const d: any = sr.session_date;
+          sessionDate = d instanceof Date ? d.toISOString().split('T')[0]! : String(d).split('T')[0]!;
+        }
+      } catch { /* session lookup failed — proceed with provided values */ }
     }
 
+    // When sessionId resolves, use the session's date (overrides frontend's default date)
+    const effectiveDate = sessionDate || date;
+
+    console.log(`[Reports] courseCode=${courseCode} date=${date} sessionDate=${sessionDate} sessionId=${sessionId}`);
+
+    // Build dynamic query based on available filters
     let sql = `
       SELECT a.id, a.course_code, a.attendance_date, a.attendance_time, a.status,
              s.index_no, s.name, s.programme, s.level
       FROM attendance a
       JOIN students s ON s.id = a.student_id
-      WHERE a.course_code = ?
     `;
-    const params: any[] = [courseCode];
+    const params: any[] = [];
+    const conditions: string[] = [];
 
-    if (date) {
-      sql += ' AND a.attendance_date = ?';
-      params.push(date);
+    if (courseCode) {
+      conditions.push('a.course_code = ?');
+      params.push(courseCode);
+    }
+    if (effectiveDate) {
+      conditions.push('a.attendance_date = ?');
+      params.push(effectiveDate);
+    }
+    if (sessionId) {
+      conditions.push('a.session_id = ?');
+      params.push(Number(sessionId));
     }
 
-    sql += ' ORDER BY a.attendance_time ASC';
+    if (conditions.length > 0) {
+      sql += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    sql += ' ORDER BY a.attendance_date DESC, a.attendance_time ASC LIMIT 500';
 
     const rows = await query(sql, params) as any[];
 
@@ -660,37 +780,35 @@ router.get('/reports', async (req, res) => {
       courseCode: r.course_code,
     }));
 
-    // Get only students enrolled in this course (not all system students)
-    let enrolledStudents: any[] = [];
-    let tableMissing = false;
-    try {
-      enrolledStudents = await query(
-        'SELECT s.index_no, s.name, s.programme, s.level FROM students s JOIN student_courses sc ON sc.student_id = s.id WHERE sc.course_code = ? ORDER BY s.index_no',
-        [courseCode || '']
-      ) as any[];
-    } catch (err: any) {
-      // student_courses table may not exist yet — fall back to all students
-      if (/doesn't exist|not found/i.test(err.message || '')) {
-        tableMissing = true;
-        enrolledStudents = await query('SELECT index_no, name, programme, level FROM students ORDER BY index_no') as any[];
+    // Only compute absent students when a specific course is filtered
+    let absentRecords: any[] = [];
+    if (courseCode) {
+      let enrolledStudents: any[] = [];
+      try {
+        enrolledStudents = await query(
+          'SELECT s.index_no, s.name, s.programme, s.level FROM students s JOIN student_courses sc ON sc.student_id = s.id WHERE sc.course_code = ? ORDER BY s.index_no',
+          [courseCode]
+        ) as any[];
+      } catch (err: any) {
+        if (/doesn't exist|not found/i.test(err.message || '')) {
+          enrolledStudents = await query('SELECT index_no, name, programme, level FROM students ORDER BY index_no') as any[];
+        }
       }
+
+      const presentIds = new Set(records.map((r: any) => r.studentId));
+      absentRecords = enrolledStudents
+        .filter((s: any) => !presentIds.has(s.index_no))
+        .map((s: any) => ({
+          studentId: s.index_no,
+          name: s.name,
+          programme: s.programme || '',
+          level: s.level || '',
+          status: 'Absent',
+          time: '-',
+          date: effectiveDate || '',
+          courseCode: courseCode || '',
+        }));
     }
-
-    const allStudents = tableMissing ? enrolledStudents : enrolledStudents;
-
-    const presentIds = new Set(records.map((r: any) => r.studentId));
-    const absentRecords = allStudents
-      .filter((s: any) => !presentIds.has(s.index_no))
-      .map((s: any) => ({
-        studentId: s.index_no,
-        name: s.name,
-        programme: s.programme || '',
-        level: s.level || '',
-        status: 'Absent',
-        time: '-',
-        date: date || '',
-        courseCode: courseCode || '',
-      }));
 
     const allRecords = [...records, ...absentRecords].sort((a, b) => a.studentId.localeCompare(b.studentId));
 
@@ -834,15 +952,17 @@ router.post('/student-courses', async (req, res) => {
 });
 
 /**
- * DELETE /api/attendance/student-courses
- * Body: { courseCode: string, studentIds: string[] }
+ * DELETE /api/attendance/student-courses?courseCode=X&studentIds=ID1,ID2
  * Remove students from a course
  */
 router.delete('/student-courses', async (req, res) => {
   try {
-    const { courseCode, studentIds } = req.body;
-    if (!courseCode || !Array.isArray(studentIds) || studentIds.length === 0) {
-      return res.status(400).json({ message: 'courseCode and studentIds array are required' });
+    const courseCode = typeof req.query.courseCode === 'string' ? req.query.courseCode.trim() : '';
+    const idsParam = typeof req.query.studentIds === 'string' ? req.query.studentIds : '';
+    const studentIds = idsParam.split(',').map(id => id.trim()).filter(id => id.length > 0);
+
+    if (!courseCode || studentIds.length === 0) {
+      return res.status(400).json({ message: 'courseCode and studentIds are required' });
     }
 
     let removed = 0;

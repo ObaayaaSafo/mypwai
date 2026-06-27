@@ -461,8 +461,8 @@ export const verifyAttendance = async (studentId?: string, fingerprintData?: str
   }
 
   const resolvedMethod: 'fingerprint' | 'face' = method || 'fingerprint';
-  // Use the active session's course code so attendance goes to the right course
   const activeCourseCode = localStorage.getItem('activeSessionCourseCode') || undefined;
+  const activeSessionId = localStorage.getItem('activeSessionId') || undefined;
 
   // Use the real fingerprint backend when biometric data is available
   if (resolvedMethod === 'fingerprint' && fingerprintData) {
@@ -470,7 +470,7 @@ export const verifyAttendance = async (studentId?: string, fingerprintData?: str
       const response = await requestFingerprint('/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ templateBase64: fingerprintData, courseCode: activeCourseCode, force: force || false }),
+        body: JSON.stringify({ templateBase64: fingerprintData, courseCode: activeCourseCode, sessionId: activeSessionId, force: force || false }),
       });
       const result = await response.json();
 
@@ -481,6 +481,9 @@ export const verifyAttendance = async (studentId?: string, fingerprintData?: str
       }
 
       const student = result.student;
+      if (result.attendance === 'not_enrolled') {
+        throw new Error(result.message || `${student.name} is not enrolled in ${result.courseCode}`);
+      }
       if (result.attendance === 'duplicate') {
         return { message: `${student.name} (${student.index}) — Already marked present for ${result.courseCode}`, courseCode: result.courseCode, duplicate: true };
       }
@@ -1001,10 +1004,9 @@ export const assignStudentsToCourse = async (courseCode: string, studentIds: str
 
 export const removeStudentsFromCourse = async (courseCode: string, studentIds: string[]) => {
   try {
-    const response = await requestAttendance('/student-courses', {
+    const params = new URLSearchParams({ courseCode, studentIds: studentIds.join(',') });
+    const response = await requestAttendance(`/student-courses?${params.toString()}`, {
       method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ courseCode, studentIds }),
     });
     return response.json();
   } catch (error) {
@@ -1035,6 +1037,12 @@ export const unlockSession = async (sessionId: number, username: string, role: s
 
 export const checkSessionLock = async (sessionId: number) => {
   const response = await requestAttendance(`/session-lock/${sessionId}`);
+  return response.json();
+};
+
+export const clearAttendance = async (courseCode: string, date: string) => {
+  const params = new URLSearchParams({ courseCode, date });
+  const response = await requestAttendance(`/attendance?${params.toString()}`, { method: 'DELETE' });
   return response.json();
 };
 

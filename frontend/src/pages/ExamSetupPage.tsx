@@ -36,7 +36,7 @@ const ExamSetupPage: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (form.course && form.courseCode && form.date && form.time && form.hall) {
-      await createSession({ id: Date.now(), ...form });
+      await createSession({ course: form.course, courseCode: form.courseCode, date: form.date, time: form.time, hall: form.hall });
       await loadSessions();
       setForm({ course: '', courseCode: '', date: '', time: '', hall: '' });
     }
@@ -68,8 +68,14 @@ const ExamSetupPage: React.FC = () => {
   const deactivateSession = async () => {
     if (activeSessionId) {
       try {
-        await unlockSession(Number(activeSessionId), username, userRole || 'invigilator');
-      } catch { /* offline — ignore */ }
+        const result = await unlockSession(Number(activeSessionId), username, userRole || 'invigilator');
+        if (!result.success) {
+          alert(result.message || `This session is locked by another invigilator. Only the admin can override.`);
+          return;
+        }
+      } catch {
+        // If backend is unreachable, proceed anyway (offline mode)
+      }
     }
     setActiveSessionId(null);
     setActiveSessionLabel('');
@@ -101,7 +107,7 @@ const ExamSetupPage: React.FC = () => {
         {userRole === 'admin' && (
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 18, marginBottom: 32 }}>
             <input type="text" placeholder="Course Name" value={form.course} onChange={e => setForm({ ...form, course: e.target.value })} className="input" required />
-            <input type="text" placeholder="Course Code" value={form.courseCode} onChange={e => setForm({ ...form, courseCode: e.target.value })} className="input" required />
+            <input type="text" placeholder="Course Code" value={form.courseCode} onChange={e => setForm({ ...form, courseCode: e.target.value.toUpperCase() })} className="input" required />
             <input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} className="input" required />
             <input type="time" value={form.time} onChange={e => setForm({ ...form, time: e.target.value })} className="input" required />
             <input type="text" placeholder="Examination Hall" value={form.hall} onChange={e => setForm({ ...form, hall: e.target.value })} className="input" required />
@@ -163,24 +169,32 @@ const ExamSetupPage: React.FC = () => {
           )}
 
           <ul style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 12, padding: 18, listStyle: 'none', border: '1px solid var(--border)' }}>
-            {sessions.length > 0 ? sessions.map(s => (
+            {sessions.length > 0 ? sessions.map(s => {
+              const isLocked = Boolean(s.locked_by);
+              const isMySession = String(s.id) === activeSessionId;
+              const isActive = isLocked || isMySession;
+              return (
               <li key={s.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, paddingBottom: 10, borderBottom: '1px solid var(--border)' }}>
                 <div>
-                  <div style={{ fontWeight: 'bold', color: 'var(--text)' }}>
+                  <div style={{ fontWeight: 'bold', color: 'var(--text)', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                     {s.course || ''} ({s.courseCode || s.course_code || ''})
-                    {String(s.id) === activeSessionId && (
+                    {isActive && (
                       <span style={{
-                        marginLeft: '0.5rem',
                         padding: '1px 8px',
                         borderRadius: '999px',
-                        background: 'rgba(94,234,212,0.2)',
-                        color: '#5EEAD4',
+                        background: isMySession ? 'rgba(94,234,212,0.2)' : 'rgba(59,130,246,0.15)',
+                        color: isMySession ? '#5EEAD4' : '#93C5FD',
                         fontSize: '0.7rem',
                         fontWeight: 700,
-                      }}>ACTIVE</span>
+                      }}>{isMySession ? 'ACTIVE' : 'IN USE'}</span>
                     )}
                   </div>
                   <div style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>{s.date || s.session_date || ''} at {s.time || s.session_time || ''} | {s.hall || ''}</div>
+                  {isLocked && (
+                    <div style={{ color: '#93C5FD', fontSize: '0.75rem', marginTop: '2px' }}>
+                      Locked by: {s.locked_by}
+                    </div>
+                  )}
                   {s.created_at && (
                     <div style={{ color: 'var(--muted)', fontSize: '0.75rem', opacity: 0.7 }}>Created: {new Date(s.created_at).toLocaleDateString()}</div>
                   )}
@@ -206,7 +220,8 @@ const ExamSetupPage: React.FC = () => {
                   )}
                 </div>
               </li>
-            )) : (
+              );
+            }) : (
               <li style={{ textAlign: 'center', color: 'var(--muted)', padding: '1rem' }}>No sessions scheduled.</li>
             )}
           </ul>

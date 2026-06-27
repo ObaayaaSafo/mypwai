@@ -34,6 +34,8 @@ const AttendancePage: React.FC = () => {
   const [deviceInfo, setDeviceInfo] = useState<ScannerDeviceInfo | null>(null);
   const [capture, setCapture] = useState<FingerprintCapture | null>(null);
   const [activeStep, setActiveStep] = useState(0);
+  const activeCourseCode = localStorage.getItem('activeSessionCourseCode');
+  const activeSessionId = localStorage.getItem('activeSessionId');
 
   useEffect(() => {
     probeDeviceConnection();
@@ -385,6 +387,33 @@ const AttendancePage: React.FC = () => {
               </div>
             </div>
 
+            {!activeSessionId && (
+              <div style={{
+                background: 'rgba(242,114,41,0.1)',
+                border: '1px solid rgba(242,114,41,0.25)',
+                borderRadius: '12px',
+                padding: '0.75rem 1rem',
+                color: '#F59E0B',
+                fontSize: '0.85rem',
+                fontWeight: 500,
+              }}>
+                ⚠️ No active session selected. Attendance will be recorded under the default course. Go to <strong>Exams</strong> to activate a session first.
+              </div>
+            )}
+            {activeCourseCode && (
+              <div style={{
+                background: 'rgba(94,234,212,0.06)',
+                border: '1px solid rgba(94,234,212,0.15)',
+                borderRadius: '12px',
+                padding: '0.5rem 0.9rem',
+                color: '#5EEAD4',
+                fontSize: '0.8rem',
+                fontWeight: 600,
+                marginTop: '0.75rem',
+              }}>
+                Active course: <strong style={{ color: 'var(--text)' }}>{activeCourseCode}</strong>
+              </div>
+            )}
             <div className="card-accent-hover" style={{ ...glassCard, padding: '1.35rem', marginTop: '1.25rem' }}>
               <div style={{ color: 'var(--muted)', lineHeight: 1.45, fontSize: '0.9rem' }}>
                 Place any enrolled finger on the scanner and the system will automatically identify the student, verify their enrollment, and record attendance for the current active session.

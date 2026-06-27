@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { fetchReports, fetchMalpracticeEvents, fetchMalpracticeSummary } from '../apiExtra';
+import { fetchReports, fetchMalpracticeEvents, fetchMalpracticeSummary, fetchSessions } from '../apiExtra';
 
 const todayStr = () => new Date().toISOString().split('T')[0];
 
@@ -23,7 +23,7 @@ const ReportingPage: React.FC = () => {
         setFilters({ course: storedCourseCode, date: storedDate || todayStr() });
       }
     }
-  }, []); // run once on mount
+  }, [activeSessionId]); // re-run when session changes
   const [reports, setReports] = useState<any[]>([]);
   const [malpracticeEvents, setMalpracticeEvents] = useState<any[]>([]);
   const [malpracticeSummary, setMalpracticeSummary] = useState<any>(null);
@@ -33,11 +33,22 @@ const ReportingPage: React.FC = () => {
   const [error, setError] = useState('');
   const [showMalpractice, setShowMalpractice] = useState(true);
 
+  // Admin: session selector
+  const [allSessions, setAllSessions] = useState<any[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState<string>(
+    !isAdmin ? (activeSessionId || '') : ''
+  );
+
+  useEffect(() => {
+    if (isAdmin) {
+      fetchSessions().then(setAllSessions).catch(() => {});
+    }
+  }, [isAdmin]);
+
   const getEffectiveSessionId = () => {
-    // For invigilators: always use the active session
-    // For admins: only use active session when NOT viewing all sessions
     if (!isAdmin) return activeSessionId;
-    return viewAllSessions ? null : activeSessionId;
+    if (viewAllSessions) return null;
+    return selectedSessionId || activeSessionId;
   };
 
   const handleSearch = async (e: React.FormEvent, overrideAll?: boolean) => {
@@ -65,13 +76,28 @@ const ReportingPage: React.FC = () => {
   const handleViewToggle = (all: boolean) => {
     setViewAllSessions(all);
     setSearched(false);
-    if (!all && activeSessionId) {
-      // Read course info from dedicated localStorage keys
+    if (all) {
+      setFilters({ course: '', date: '' });
+      setSelectedSessionId('');
+    } else if (!isAdmin && activeSessionId) {
       const storedCourseCode = localStorage.getItem('activeSessionCourseCode') || '';
       const storedDate = localStorage.getItem('activeSessionDate') || '';
       if (storedCourseCode || storedDate) {
         setFilters({ course: storedCourseCode, date: storedDate || todayStr() });
       }
+    }
+  };
+
+  const handleSessionSelect = (sessionId: string) => {
+    setSelectedSessionId(sessionId);
+    setViewAllSessions(false);
+    setSearched(false);
+    const session = allSessions.find(s => String(s.id) === sessionId);
+    if (session) {
+      const cc = session.courseCode || session.course_code || '';
+      const sd = session.date || session.session_date || '';
+      const d = sd instanceof Date ? (sd as any).toISOString?.()?.split('T')?.[0] || String(sd).split('T')[0] : String(sd || '').split('T')[0];
+      setFilters({ course: cc, date: d || todayStr() });
     }
   };
 
@@ -151,6 +177,11 @@ const ReportingPage: React.FC = () => {
   // Determines the scope label for display
   const getScopeLabel = () => {
     if (isAdmin && viewAllSessions) return 'All Sessions';
+    if (isAdmin && selectedSessionId) {
+      const s = allSessions.find(x => String(x.id) === selectedSessionId);
+      if (s) return `${s.courseCode || s.course_code || ''} — ${s.course || ''}`;
+      return 'Selected Session';
+    }
     if (activeSessionId) return activeSessionLabel;
     return 'No Session Selected';
   };
@@ -164,6 +195,10 @@ const ReportingPage: React.FC = () => {
           body { background-color: white !important; }
           .print-container { padding: 0 !important; margin: 0 !important; max-width: 100% !important; }
         }
+        .session-select option {
+          background: var(--card-solid);
+          color: var(--text);
+        }
       `}</style>
       <h2 className="animate-fade-in-up" style={{ marginBottom: '0.5rem', color: 'var(--accent)' }}>Attendance Reports</h2>
 
@@ -176,64 +211,62 @@ const ReportingPage: React.FC = () => {
         <div style={{
           background: isAdmin && viewAllSessions
             ? 'rgba(59,130,246,0.12)'
-            : activeSessionId
+            : (selectedSessionId || activeSessionId)
               ? 'linear-gradient(135deg, rgba(15,118,110,0.15), rgba(45,212,191,0.08))'
               : 'rgba(242,114,41,0.08)',
           border: isAdmin && viewAllSessions
             ? '1px solid rgba(59,130,246,0.25)'
-            : activeSessionId
+            : (selectedSessionId || activeSessionId)
               ? '1px solid rgba(94,234,212,0.25)'
               : '1px solid rgba(242,114,41,0.2)',
           borderRadius: '999px',
           padding: '0.35rem 1rem',
           fontSize: '0.85rem',
           fontWeight: 600,
-          color: isAdmin && viewAllSessions ? '#93C5FD' : activeSessionId ? '#5EEAD4' : '#F59E0B',
+          color: isAdmin && viewAllSessions ? '#93C5FD' : (selectedSessionId || activeSessionId) ? '#5EEAD4' : '#F59E0B',
           display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
         }}>
           <span style={{
             width: '8px', height: '8px', borderRadius: '50%',
-            background: isAdmin && viewAllSessions ? '#3B82F6' : activeSessionId ? '#5EEAD4' : '#F59E0B',
-            boxShadow: `0 0 6px ${isAdmin && viewAllSessions ? '#3B82F6' : activeSessionId ? '#5EEAD4' : '#F59E0B'}`,
+            background: isAdmin && viewAllSessions ? '#3B82F6' : (selectedSessionId || activeSessionId) ? '#5EEAD4' : '#F59E0B',
+            boxShadow: `0 0 6px ${isAdmin && viewAllSessions ? '#3B82F6' : (selectedSessionId || activeSessionId) ? '#5EEAD4' : '#F59E0B'}`,
           }} />
           {getScopeLabel()}
         </div>
 
-        {/* Admin: toggle All Sessions / My Session */}
+        {/* Admin: session selector + All Sessions toggle */}
         {isAdmin && (
-          <div style={{ display: 'flex', gap: '0.25rem', background: 'var(--input-bg)', borderRadius: '999px', padding: '2px' }}>
-            <button
-              onClick={() => handleViewToggle(false)}
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            <select
+              className="session-select"
+              value={viewAllSessions ? '' : selectedSessionId}
+              onChange={e => {
+                if (e.target.value === '__all__') {
+                  handleViewToggle(true);
+                } else {
+                  handleSessionSelect(e.target.value);
+                }
+              }}
               style={{
-                padding: '0.35rem 0.9rem',
-                borderRadius: '999px',
-                border: 'none',
+                padding: '0.4rem 0.75rem',
+                borderRadius: '8px',
+                border: '1px solid var(--border-strong)',
+                background: 'var(--card-solid)',
+                color: 'var(--text)',
+                fontSize: '0.85rem',
+                fontWeight: 500,
                 cursor: 'pointer',
-                fontSize: '0.8rem',
-                fontWeight: 600,
-                background: !viewAllSessions ? 'var(--card-solid)' : 'transparent',
-                color: !viewAllSessions ? 'var(--text)' : 'var(--muted)',
-                transition: 'all 0.2s',
+                maxWidth: '300px',
               }}
             >
-              My Session
-            </button>
-            <button
-              onClick={() => handleViewToggle(true)}
-              style={{
-                padding: '0.35rem 0.9rem',
-                borderRadius: '999px',
-                border: 'none',
-                cursor: 'pointer',
-                fontSize: '0.8rem',
-                fontWeight: 600,
-                background: viewAllSessions ? 'var(--card-solid)' : 'transparent',
-                color: viewAllSessions ? 'var(--text)' : 'var(--muted)',
-                transition: 'all 0.2s',
-              }}
-            >
-              All Sessions
-            </button>
+              <option value="">— Select a session —</option>
+              {allSessions.map((s: any) => (
+                <option key={s.id} value={String(s.id)}>
+                  {s.courseCode || s.course_code || ''} — {s.course || ''} ({s.date || s.session_date || ''})
+                </option>
+              ))}
+              <option value="__all__">📋 All Sessions (no filter)</option>
+            </select>
           </div>
         )}
 
@@ -248,11 +281,11 @@ const ReportingPage: React.FC = () => {
       <form className="no-print card card-accent-hover" onSubmit={handleSearch} style={{ padding: '1rem', display: 'flex', gap: '0.75rem', alignItems: 'flex-end', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
         <div style={{ flex: 1, minWidth: '150px' }}>
           <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Course Code <span style={{fontWeight:400, color:'var(--muted)'}}>(optional)</span></label>
-          <input type="text" value={filters.course} placeholder="e.g. CSC101" onChange={e => setFilters({...filters, course: e.target.value})} className="input" style={{ width: '100%' }} disabled={!viewAllSessions && !!activeSessionId} />
+          <input type="text" value={filters.course} placeholder="e.g. CSC101" onChange={e => setFilters({...filters, course: e.target.value})} className="input" style={{ width: '100%' }} disabled={!isAdmin && !viewAllSessions && !!activeSessionId} />
         </div>
         <div style={{ flex: 1, minWidth: '150px' }}>
           <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Date</label>
-          <input type="date" value={filters.date} onChange={e => setFilters({...filters, date: e.target.value})} className="input" style={{ width: '100%' }} disabled={!viewAllSessions && !!activeSessionId} />
+          <input type="date" value={filters.date} onChange={e => setFilters({...filters, date: e.target.value})} className="input" style={{ width: '100%' }} disabled={!isAdmin && !viewAllSessions && !!activeSessionId} />
         </div>
         <button type="submit" disabled={loading} className="btn btn-secondary">{loading ? 'Loading...' : 'Generate Report'}</button>
       </form>
@@ -270,7 +303,18 @@ const ReportingPage: React.FC = () => {
             )}
           </div>
           <div style={{ display: 'flex', gap: '0.5rem' }}>
-            <button className="btn btn-ghost" onClick={handleExport}>Export Text</button>
+            <button className="btn btn-ghost" onClick={handleExport}>Export CSV</button>
+            {userRole === 'admin' && reports.length > 0 && (
+              <button className="btn btn-ghost" onClick={async () => {
+                if (window.confirm(`Delete all attendance and scan events for ${filters.course} on ${filters.date}?`)) {
+                  const { clearAttendance } = await import('../apiExtra');
+                  const result = await clearAttendance(filters.course, filters.date);
+                  alert(`Cleared ${result.attendanceDeleted} attendance record(s) and ${result.scanEventsDeleted} scan event(s).`);
+                  setReports([]);
+                  setSearched(false);
+                }
+              }} style={{ color: '#FCA5A5', borderColor: 'rgba(220,38,38,0.3)' }}>Clear Attendance</button>
+            )}
             <button className="btn" onClick={() => window.print()}>Print Report</button>
           </div>
         </div>
@@ -345,6 +389,7 @@ const ReportingPage: React.FC = () => {
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead style={{ background: 'rgba(255,255,255,0.04)', borderBottom: '2px solid var(--border)' }}>
               <tr>
+                {isAdmin && viewAllSessions && <th style={{ padding: '1rem', textAlign: 'left', color: 'var(--text-secondary)' }}>Course</th>}
                 <th style={{ padding: '1rem', textAlign: 'left', color: 'var(--text-secondary)' }}>Student ID</th>
                 <th style={{ padding: '1rem', textAlign: 'left', color: 'var(--text-secondary)' }}>Name</th>
                 <th style={{ padding: '1rem', textAlign: 'left', color: 'var(--text-secondary)' }}>Status</th>
@@ -354,6 +399,7 @@ const ReportingPage: React.FC = () => {
             <tbody>
               {displayedReports.map((r, i) => (
                 <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                  {isAdmin && viewAllSessions && <td style={{ padding: '1rem', color: '#93C5FD', fontWeight: 600 }}>{r.courseCode}</td>}
                   <td style={{ padding: '1rem' }}>{r.studentId}</td>
                   <td style={{ padding: '1rem' }}>{r.name}</td>
                   <td style={{ padding: '1rem' }}>
@@ -364,7 +410,7 @@ const ReportingPage: React.FC = () => {
                   <td style={{ padding: '1rem' }}>{r.time}</td>
                 </tr>
               ))}
-              {displayedReports.length === 0 && <tr><td colSpan={4} style={{ padding: '2rem', textAlign: 'center', color: 'var(--muted)' }}>No records found. Try generating a report first.</td></tr>}
+              {displayedReports.length === 0 && <tr><td colSpan={isAdmin && viewAllSessions ? 5 : 4} style={{ padding: '2rem', textAlign: 'center', color: 'var(--muted)' }}>No records found. Try generating a report first.</td></tr>}
             </tbody>
           </table>
         </div>

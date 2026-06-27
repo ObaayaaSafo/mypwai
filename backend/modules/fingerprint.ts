@@ -170,7 +170,7 @@ router.post('/enroll', async (req, res) => {
 router.post('/verify', async (req, res) => {
   try {
     await ensureReady();
-    const { templateBase64, courseCode: requestedCourseCode, force } = req.body;
+    const { templateBase64, courseCode: requestedCourseCode, sessionId: requestedSessionId, force } = req.body;
 
     let captureResult: { templateBase64: string } | null = null;
     if (templateBase64) {
@@ -208,17 +208,68 @@ router.post('/verify', async (req, res) => {
 
     const student = rows[0];
     const now = new Date();
-    const today = now.toISOString().split('T')[0];
+    let today = now.toISOString().split('T')[0];
     const nowTime = now.toTimeString().split(' ')[0]; // HH:MM:SS 24h format
 
     // Use the course code from the request (active session), or fall back to today's first session
-    let courseCode = requestedCourseCode || '';
+    let courseCode = (requestedCourseCode || '').toUpperCase();
     if (!courseCode) {
       const todaySessions = await query(
         'SELECT course_code FROM sessions WHERE session_date = ? LIMIT 1',
         [today]
       ) as { course_code: string }[];
       courseCode = todaySessions[0]?.course_code || 'DEMO101';
+    }
+
+    // Determine session_id and session date (for precise cascade on delete + correct date)
+    let sessionId: number | null = null;
+    if (requestedSessionId) {
+      const sid = Number(requestedSessionId);
+      if (!isNaN(sid) && sid > 0) sessionId = sid;
+    }
+    if (!sessionId) {
+      // Fallback: find the session for this courseCode on today's date
+      const sessionRows = await query(
+        'SELECT id, session_date FROM sessions WHERE course_code = ? AND session_date = ? LIMIT 1',
+        [courseCode, today]
+      ) as { id: number; session_date: string }[];
+      if (sessionRows.length > 0) {
+        const sr = sessionRows[0]!;
+        sessionId = sr.id;
+        const d: any = sr.session_date;
+        today = d instanceof Date ? d.toISOString().split('T')[0] : String(d).split('T')[0];
+      }
+    } else {
+      // Use the session's actual date for attendance_date (not today's date)
+      const sessionRows = await query(
+        'SELECT session_date FROM sessions WHERE id = ?',
+        [sessionId]
+      ) as { session_date: string }[];
+      if (sessionRows.length > 0) {
+        const d: any = sessionRows[0]!.session_date;
+        today = d instanceof Date ? d.toISOString().split('T')[0] : String(d).split('T')[0];
+      }
+    }
+
+    // Check course enrollment — student must be enrolled in this course
+    try {
+      const enrollment = await query(
+        'SELECT 1 FROM student_courses WHERE student_id = ? AND course_code = ? LIMIT 1',
+        [student.id, courseCode]
+      ) as any[];
+      if (enrollment.length === 0) {
+        return res.json({
+          matched: true,
+          student: { index: student.index_no, name: student.name, programme: student.programme, level: student.level },
+          score: match.score,
+          fid: match.fid,
+          attendance: 'not_enrolled',
+          courseCode,
+          message: `${student.name} (${student.index_no}) is not enrolled in ${courseCode}`
+        });
+      }
+    } catch {
+      // student_courses table may not exist — allow attendance anyway
     }
 
     // Check for duplicate attendance
@@ -244,12 +295,12 @@ router.post('/verify', async (req, res) => {
     try {
       await transaction(async (conn) => {
         await conn.execute(
-          'INSERT INTO attendance (student_id, course_code, attendance_date, attendance_time, status) VALUES (?, ?, ?, ?, ?)',
-          [student.id, courseCode, today, nowTime, 'Present']
+          'INSERT INTO attendance (student_id, course_code, session_id, attendance_date, attendance_time, status) VALUES (?, ?, ?, ?, ?, ?)',
+          [student.id, courseCode, sessionId, today, nowTime, 'Present']
         );
         await conn.execute(
-          'INSERT INTO scan_events (student_id, course_code, event_date, event_time, result) VALUES (?, ?, ?, ?, ?)',
-          [student.id, courseCode, today, nowTime, 'success']
+          'INSERT INTO scan_events (student_id, course_code, session_id, event_date, event_time, result) VALUES (?, ?, ?, ?, ?, ?)',
+          [student.id, courseCode, sessionId, today, nowTime, 'success']
         );
       });
     } catch (err: any) {
@@ -257,7 +308,7 @@ router.post('/verify', async (req, res) => {
       return res.json({ matched: true, student: { index: student.index_no, name: student.name, programme: student.programme, level: student.level }, score: match.score, fid: match.fid, attendance: 'error', error: err.message });
     }
 
-    console.log(`[Fingerprint] Attendance recorded: ${student.name} (${student.index_no}) for ${courseCode}`);
+    console.log(`[Fingerprint] Attendance recorded: ${student.name} (${student.index_no}) for ${courseCode} on ${today} at ${nowTime} — student.id=${student.id}`);
     res.json({ matched: true, student: { index: student.index_no, name: student.name, programme: student.programme, level: student.level }, score: match.score, fid: match.fid, attendance: 'recorded', courseCode, time: nowTime });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
