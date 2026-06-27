@@ -170,7 +170,7 @@ router.post('/enroll', async (req, res) => {
 router.post('/verify', async (req, res) => {
   try {
     await ensureReady();
-    const { templateBase64 } = req.body;
+    const { templateBase64, courseCode: requestedCourseCode, force } = req.body;
 
     let captureResult: { templateBase64: string } | null = null;
     if (templateBase64) {
@@ -211,12 +211,15 @@ router.post('/verify', async (req, res) => {
     const today = now.toISOString().split('T')[0];
     const nowTime = now.toTimeString().split(' ')[0]; // HH:MM:SS 24h format
 
-    // Get active session for today
-    const todaySessions = await query(
-      'SELECT course_code FROM sessions WHERE session_date = ? LIMIT 1',
-      [today]
-    ) as { course_code: string }[];
-    const courseCode = todaySessions[0]?.course_code || 'DEMO101';
+    // Use the course code from the request (active session), or fall back to today's first session
+    let courseCode = requestedCourseCode || '';
+    if (!courseCode) {
+      const todaySessions = await query(
+        'SELECT course_code FROM sessions WHERE session_date = ? LIMIT 1',
+        [today]
+      ) as { course_code: string }[];
+      courseCode = todaySessions[0]?.course_code || 'DEMO101';
+    }
 
     // Check for duplicate attendance
     const duplicates = await query(
@@ -224,14 +227,17 @@ router.post('/verify', async (req, res) => {
       [student.id, courseCode, today, 'Present']
     ) as { id: number }[];
 
-    if (duplicates.length > 0) {
-      try {
-        await exec(
-          "INSERT INTO scan_events (student_id, course_code, event_date, event_time, result, reason) VALUES (?, ?, ?, ?, ?, ?)",
-          [student.id, courseCode, today, nowTime, 'duplicate', 'duplicate_check_in']
-        );
-      } catch { /* non-critical */ }
-      return res.json({ matched: true, student: { index: student.index_no, name: student.name, programme: student.programme, level: student.level }, score: match.score, fid: match.fid, attendance: 'duplicate', courseCode });
+    if (duplicates.length > 0 && !force) {
+      // Duplicate — return with option to override
+      return res.json({
+        matched: true,
+        student: { index: student.index_no, name: student.name, programme: student.programme, level: student.level },
+        score: match.score,
+        fid: match.fid,
+        attendance: 'duplicate',
+        courseCode,
+        message: `${student.name} (${student.index_no}) already marked present for ${courseCode}`
+      });
     }
 
     // Record attendance + scan event in a transaction

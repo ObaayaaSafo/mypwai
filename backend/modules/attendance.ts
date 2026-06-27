@@ -3,6 +3,8 @@
 //        GET /scan-events:237 | POST /scan-events:247 | POST /verify:260
 //        GET /malpractice:244 | GET /malpractice-summary:303 | GET /reports:512 | GET /summary:578
 //        GET /export:348 | POST /import:361
+//        GET /student-courses:598 | POST /student-courses:622 | DELETE /student-courses:650
+//        GET /student-courses/courses:660
 import express from 'express';
 import { query, exec, transaction } from '../db.js';
 import type { Connection } from 'mysql2/promise';
@@ -624,19 +626,20 @@ router.get('/reports', async (req, res) => {
     const courseCode = typeof req.query.courseCode === 'string' ? req.query.courseCode.trim() : '';
     const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
 
+    // Require a course code — without it, records from different courses get mixed
+    if (!courseCode) {
+      return res.json([]);
+    }
+
     let sql = `
       SELECT a.id, a.course_code, a.attendance_date, a.attendance_time, a.status,
              s.index_no, s.name, s.programme, s.level
       FROM attendance a
       JOIN students s ON s.id = a.student_id
-      WHERE 1=1
+      WHERE a.course_code = ?
     `;
-    const params: any[] = [];
+    const params: any[] = [courseCode];
 
-    if (courseCode) {
-      sql += ' AND a.course_code = ?';
-      params.push(courseCode);
-    }
     if (date) {
       sql += ' AND a.attendance_date = ?';
       params.push(date);
@@ -657,8 +660,24 @@ router.get('/reports', async (req, res) => {
       courseCode: r.course_code,
     }));
 
-    // Get all students to fill in absentees
-    const allStudents = await query('SELECT index_no, name, programme, level FROM students ORDER BY index_no') as any[];
+    // Get only students enrolled in this course (not all system students)
+    let enrolledStudents: any[] = [];
+    let tableMissing = false;
+    try {
+      enrolledStudents = await query(
+        'SELECT s.index_no, s.name, s.programme, s.level FROM students s JOIN student_courses sc ON sc.student_id = s.id WHERE sc.course_code = ? ORDER BY s.index_no',
+        [courseCode || '']
+      ) as any[];
+    } catch (err: any) {
+      // student_courses table may not exist yet — fall back to all students
+      if (/doesn't exist|not found/i.test(err.message || '')) {
+        tableMissing = true;
+        enrolledStudents = await query('SELECT index_no, name, programme, level FROM students ORDER BY index_no') as any[];
+      }
+    }
+
+    const allStudents = tableMissing ? enrolledStudents : enrolledStudents;
+
     const presentIds = new Set(records.map((r: any) => r.studentId));
     const absentRecords = allStudents
       .filter((s: any) => !presentIds.has(s.index_no))
@@ -719,6 +738,181 @@ router.get('/summary', async (req, res) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to get summary';
     res.status(500).json({ message });
+  }
+});
+
+// ========== STUDENT COURSE ENROLLMENT ==========
+
+/**
+ * GET /api/attendance/student-courses?courseCode=X
+ * Returns students enrolled in a specific course, or all course codes if no courseCode
+ */
+router.get('/student-courses', async (req, res) => {
+  try {
+    const courseCode = typeof req.query.courseCode === 'string' ? req.query.courseCode.trim() : '';
+
+    if (!courseCode) {
+      const courses = await query(
+        'SELECT DISTINCT sc.course_code FROM student_courses sc ORDER BY sc.course_code'
+      ) as any[];
+      return res.json({ courses: courses.map((c: any) => c.course_code) });
+    }
+
+    const students = await query(
+      `SELECT s.id, s.index_no, s.name, s.programme, s.level
+       FROM students s
+       JOIN student_courses sc ON sc.student_id = s.id
+       WHERE sc.course_code = ?
+       ORDER BY s.index_no`,
+      [courseCode]
+    ) as any[];
+
+    res.json(students);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to fetch course enrollments';
+    res.status(500).json({ message });
+  }
+});
+
+/**
+ * GET /api/attendance/student-courses/courses
+ * Returns all course codes that have at least one enrolled student
+ */
+router.get('/student-courses/courses', async (_req, res) => {
+  try {
+    const courses = await query(
+      'SELECT DISTINCT sc.course_code FROM student_courses sc ORDER BY sc.course_code'
+    ) as any[];
+    res.json({ courses: courses.map((c: any) => c.course_code) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to fetch courses';
+    res.status(500).json({ message });
+  }
+});
+
+/**
+ * POST /api/attendance/student-courses
+ * Body: { courseCode: string, studentIds: string[] }
+ * Bulk assign students to a course (by index_no)
+ */
+router.post('/student-courses', async (req, res) => {
+  try {
+    const { courseCode, studentIds } = req.body;
+    if (!courseCode || !Array.isArray(studentIds) || studentIds.length === 0) {
+      return res.status(400).json({ message: 'courseCode and studentIds array are required' });
+    }
+
+    let added = 0;
+    let skipped = 0;
+    const errors: string[] = [];
+
+    for (const indexNo of studentIds) {
+      try {
+        const rows = await query('SELECT id FROM students WHERE index_no = ?', [String(indexNo).trim()]) as any[];
+        if (rows.length === 0) {
+          skipped++;
+          errors.push(`Student ${indexNo}: not found`);
+          continue;
+        }
+        const studentId = rows[0].id;
+        await exec(
+          'INSERT IGNORE INTO student_courses (student_id, course_code) VALUES (?, ?)',
+          [studentId, courseCode]
+        );
+        added++;
+      } catch (err: any) {
+        skipped++;
+        errors.push(`Student ${indexNo}: ${err.message || 'DB error'}`);
+      }
+    }
+
+    res.json({ success: true, added, skipped, errors: errors.slice(0, 10) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to assign students to course';
+    res.status(500).json({ message });
+  }
+});
+
+/**
+ * DELETE /api/attendance/student-courses
+ * Body: { courseCode: string, studentIds: string[] }
+ * Remove students from a course
+ */
+router.delete('/student-courses', async (req, res) => {
+  try {
+    const { courseCode, studentIds } = req.body;
+    if (!courseCode || !Array.isArray(studentIds) || studentIds.length === 0) {
+      return res.status(400).json({ message: 'courseCode and studentIds array are required' });
+    }
+
+    let removed = 0;
+    for (const indexNo of studentIds) {
+      const rows = await query('SELECT id FROM students WHERE index_no = ?', [String(indexNo)]) as any[];
+      if (rows.length === 0) continue;
+      const studentId = rows[0].id;
+      await exec(
+        'DELETE FROM student_courses WHERE student_id = ? AND course_code = ?',
+        [studentId, courseCode]
+      );
+      removed++;
+    }
+
+    res.json({ success: true, removed });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to remove students from course';
+    res.status(500).json({ message });
+  }
+});
+
+// ========== SESSION LOCKS ==========
+
+router.post('/session-lock', async (req, res) => {
+  try {
+    const { sessionId, username, role } = req.body;
+    if (!sessionId || !username) return res.status(400).json({ message: 'sessionId and username required' });
+
+    // Admin always bypasses
+    if (role === 'admin') {
+      await exec('DELETE FROM session_locks WHERE session_id = ?', [sessionId]);
+      await exec('INSERT INTO session_locks (session_id, locked_by) VALUES (?, ?) ON DUPLICATE KEY UPDATE locked_by = ?, locked_at = CURRENT_TIMESTAMP', [sessionId, username, username]);
+      return res.json({ success: true, lockedBy: username });
+    }
+
+    const existing = await query('SELECT locked_by FROM session_locks WHERE session_id = ?', [sessionId]) as any[];
+    if (existing.length > 0 && existing[0].locked_by !== username) {
+      return res.json({ success: false, lockedBy: existing[0].locked_by });
+    }
+
+    await exec('INSERT INTO session_locks (session_id, locked_by) VALUES (?, ?) ON DUPLICATE KEY UPDATE locked_by = ?, locked_at = CURRENT_TIMESTAMP', [sessionId, username, username]);
+    res.json({ success: true, lockedBy: username });
+  } catch (error) {
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed' });
+  }
+});
+
+router.delete('/session-lock/:sessionId', async (req, res) => {
+  try {
+    const sessionId = Number(req.params.sessionId);
+    const { username, role } = req.body;
+    const existing = await query('SELECT locked_by FROM session_locks WHERE session_id = ?', [sessionId]) as any[];
+    if (existing.length === 0) return res.json({ success: true });
+    if (existing[0].locked_by !== username && role !== 'admin') {
+      return res.json({ success: false, message: `Locked by ${existing[0].locked_by}` });
+    }
+    await exec('DELETE FROM session_locks WHERE session_id = ?', [sessionId]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed' });
+  }
+});
+
+router.get('/session-lock/:sessionId', async (req, res) => {
+  try {
+    const sessionId = Number(req.params.sessionId);
+    const existing = await query('SELECT locked_by, locked_at FROM session_locks WHERE session_id = ?', [sessionId]) as any[];
+    res.json(existing.length > 0 ? { locked: true, lockedBy: existing[0].locked_by } : { locked: false });
+  } catch (error) {
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed' });
   }
 });
 

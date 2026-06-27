@@ -125,6 +125,8 @@ const MonitoringPage: React.FC = () => {
   const [localFaceProfiles, setLocalFaceProfiles] = useState<FaceProfile[]>([]);
   const [loadingFaces, setLoadingFaces] = useState(false);
   const [hallViewMode, setHallViewMode] = useState<'single' | 'grid'>('grid');
+  const activeSessionId = localStorage.getItem('activeSessionId');
+  const activeSessionLabel = localStorage.getItem('activeSessionLabel') || '';
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -788,6 +790,7 @@ const MonitoringPage: React.FC = () => {
         severity,
         suspicionScore,
         detail,
+        sessionId: activeSessionId || undefined,
       });
     }
   };
@@ -1289,7 +1292,40 @@ const MonitoringPage: React.FC = () => {
       padding: '2rem'
     }}>
       <div style={{ maxWidth: '1000px', margin: '0 auto' }}>
-        <h2 className="animate-fade-in-up" style={{ color: 'var(--accent)', marginBottom: '1.5rem' }}>Live Exam Monitoring</h2>
+        <h2 className="animate-fade-in-up" style={{ color: 'var(--accent)', marginBottom: '0.5rem' }}>Live Exam Monitoring</h2>
+
+        {/* Active Session Indicator */}
+        {activeSessionId ? (
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(15,118,110,0.15), rgba(45,212,191,0.08))',
+            border: '1px solid rgba(94,234,212,0.25)',
+            borderRadius: '12px',
+            padding: '0.6rem 1.25rem',
+            marginBottom: '1.5rem',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            color: '#5EEAD4',
+            fontWeight: 600,
+            fontSize: '0.9rem',
+          }}>
+            <span className="status-dot status-dot--live" />
+            Monitoring: {activeSessionLabel}
+          </div>
+        ) : (
+          <div style={{
+            background: 'rgba(242,114,41,0.08)',
+            border: '1px solid rgba(242,114,41,0.2)',
+            borderRadius: '12px',
+            padding: '0.75rem 1rem',
+            marginBottom: '1.5rem',
+            color: '#F59E0B',
+            fontSize: '0.85rem',
+            fontWeight: 500,
+          }}>
+            ⚠️ No active exam session. Go to <strong>Exams</strong> to select a session before monitoring.
+          </div>
+        )}
         
         <div className="stagger-children" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', marginBottom: '2rem' }}>
           <div className="card-accent-hover" style={{ background: 'var(--card)', padding: '1.5rem', borderRadius: '16px', border: '1px solid var(--border)' }}>

@@ -149,9 +149,45 @@ const AttendancePage: React.FC = () => {
       const res = await verifyAttendance(undefined, fingerprintData.template);
       setActiveStep(progressSteps.length - 1);
       setScanProgress(100);
-      setMessage(res.message);
-      setMessageType(res.duplicate ? 'warning' : 'success');
-      playSuccessSound();
+
+      if (res.duplicate) {
+        // Show override dialog for duplicates
+        const action = window.confirm(
+          `${res.message}\n\nOK — acknowledge and continue\nCancel — override (force re-mark attendance)`
+        );
+        if (!action) {
+          // User chose to override — force re-record attendance
+          setMessage('Overriding duplicate...');
+          setMessageType('info');
+          setLoading(true);
+          try {
+            const forced = await verifyAttendance(undefined, fingerprintData.template, undefined, true);
+            setMessage(forced.message);
+            setMessageType('success');
+            playSuccessSound();
+          } catch (err: any) {
+            setMessage(err.message || 'Override failed');
+            setMessageType('error');
+            playErrorSound();
+          }
+          setLoading(false);
+        } else {
+          // User chose OK — just acknowledge
+          setMessage(res.message);
+          setMessageType('success');
+        }
+      } else {
+        setMessage(res.message);
+        setMessageType('success');
+        playSuccessSound();
+      }
+      // Auto-reset after 2s so the next scan can start immediately
+      setTimeout(() => {
+        setMessage('');
+        setScanProgress(0);
+        setActiveStep(0);
+        setCapture(null);
+      }, 2000);
     } catch (error) {
       console.error('Attendance verification error:', error);
       const errMsg = error instanceof Error ? error.message : 'Verification failed';

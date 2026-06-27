@@ -47,8 +47,8 @@
 }
 
 [data-theme="light"] {
-  --bg: #D9E0E8;
-  --bg-card: #E4E9EF;
+  --bg: #F1F5F9;
+  --bg-card: #F8FAFC;
   --card: rgba(255,255,255,0.94);
   --card-solid: #FFFFFF;
   --muted: #6B7280;
@@ -64,7 +64,7 @@
   --glass: rgba(255,255,255,0.9);
   --border: rgba(0,0,0,0.06);
   --border-strong: rgba(0,0,0,0.11);
-  --input-bg: #DDE4EE;
+  --input-bg: #E2E8F0;
   --input-bg-focus: #FFFFFF;
   --shadow-sm: 0 2px 12px rgba(0,0,0,0.04);
   --shadow-md: 0 8px 30px rgba(0,0,0,0.06);
@@ -93,7 +93,7 @@ body{
   background-image:
     radial-gradient(circle at top right, rgba(255,182,6,0.04), transparent 50%),
     radial-gradient(circle at bottom left, rgba(242,114,41,0.03), transparent 40%),
-    linear-gradient(180deg, #D9E0E8 0%, #CFD7E0 50%, #D9E0E8 100%);
+    linear-gradient(180deg, #F1F5F9 0%, #E8EDF3 50%, #F1F5F9 100%);
 }
 
 .app-shell{

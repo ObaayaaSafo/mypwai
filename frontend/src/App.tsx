@@ -111,8 +111,8 @@ function AppContent() {
           <Route path="/" element={<LoginPage />} />
           <Route path="/login" element={<SignInPage />} />
           <Route path="/dashboard" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
-          <Route path="/students" element={<ProtectedRoute><StudentManagementPage /></ProtectedRoute>} />
-          <Route path="/enroll" element={<ProtectedRoute><FingerprintEnrollmentPage /></ProtectedRoute>} />
+          <Route path="/students" element={<AdminRoute><StudentManagementPage /></AdminRoute>} />
+          <Route path="/enroll" element={<AdminRoute><FingerprintEnrollmentPage /></AdminRoute>} />
           <Route path="/exam-setup" element={<ProtectedRoute><ExamSetupPage /></ProtectedRoute>} />
           <Route path="/attendance" element={<ProtectedRoute><AttendancePage /></ProtectedRoute>} />
           <Route path="/monitoring" element={<ProtectedRoute><MonitoringPage /></ProtectedRoute>} />

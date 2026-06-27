@@ -198,11 +198,12 @@ const requestAttendance = async (path: string, init?: RequestInit) => {
   throw lastError || new Error('Unable to reach backend attendance API');
 };
 
-export const fetchMalpracticeEvents = async (courseCode?: string, date?: string) => {
+export const fetchMalpracticeEvents = async (courseCode?: string, date?: string, sessionId?: string | null) => {
   try {
     const params = new URLSearchParams();
     if (courseCode) params.set('courseCode', courseCode);
     if (date) params.set('date', date);
+    if (sessionId) params.set('sessionId', sessionId);
     const response = await requestAttendance(`/malpractice?${params.toString()}`);
     return await response.json();
   } catch {
@@ -215,6 +216,7 @@ export const fetchMalpracticeEvents = async (courseCode?: string, date?: string)
         if (!reason.startsWith('malpractice:')) return false;
         if (courseCode && e.courseCode !== courseCode) return false;
         if (date && e.date !== date) return false;
+        if (sessionId && e.sessionId && String(e.sessionId) !== String(sessionId)) return false;
         return true;
       })
       .map((e: any) => {
@@ -240,11 +242,12 @@ export const fetchMalpracticeEvents = async (courseCode?: string, date?: string)
   }
 };
 
-export const fetchMalpracticeSummary = async (courseCode?: string, date?: string) => {
+export const fetchMalpracticeSummary = async (courseCode?: string, date?: string, sessionId?: string | null) => {
   try {
     const params = new URLSearchParams();
     if (courseCode) params.set('courseCode', courseCode);
     if (date) params.set('date', date);
+    if (sessionId) params.set('sessionId', sessionId);
     const response = await requestAttendance(`/malpractice-summary?${params.toString()}`);
     return await response.json();
   } catch {
@@ -288,6 +291,7 @@ const postAI = async (path: string, payload: Record<string, unknown>) => {
 const recordScanEvent = async (event: {
   studentId?: string;
   courseCode?: string;
+  sessionId?: string;
   result: 'success' | 'failed' | 'duplicate' | 'enrollment';
   reason?: string;
 }) => {
@@ -451,12 +455,14 @@ export const fetchMonitoring = async () => {
   };
 };
 
-export const verifyAttendance = async (studentId?: string, fingerprintData?: string, method?: 'fingerprint' | 'face') => {
+export const verifyAttendance = async (studentId?: string, fingerprintData?: string, method?: 'fingerprint' | 'face', force?: boolean) => {
   if (!studentId && !fingerprintData) {
     throw new Error('studentId or fingerprint data is required');
   }
 
   const resolvedMethod: 'fingerprint' | 'face' = method || 'fingerprint';
+  // Use the active session's course code so attendance goes to the right course
+  const activeCourseCode = localStorage.getItem('activeSessionCourseCode') || undefined;
 
   // Use the real fingerprint backend when biometric data is available
   if (resolvedMethod === 'fingerprint' && fingerprintData) {
@@ -464,7 +470,7 @@ export const verifyAttendance = async (studentId?: string, fingerprintData?: str
       const response = await requestFingerprint('/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ templateBase64: fingerprintData }),
+        body: JSON.stringify({ templateBase64: fingerprintData, courseCode: activeCourseCode, force: force || false }),
       });
       const result = await response.json();
 
@@ -476,19 +482,20 @@ export const verifyAttendance = async (studentId?: string, fingerprintData?: str
 
       const student = result.student;
       if (result.attendance === 'duplicate') {
-        return { message: `Duplicate scan detected for ${student.name} (${student.index})`, courseCode: result.courseCode, duplicate: true };
+        return { message: `${student.name} (${student.index}) — Already marked present for ${result.courseCode}`, courseCode: result.courseCode, duplicate: true };
       }
       if (result.attendance === 'error') {
-        return { message: `Verified: ${student.name}, but attendance recording failed: ${result.error}`, courseCode: result.courseCode };
+        throw new Error(`Verified ${student.name}, but attendance recording failed: ${result.error}`);
       }
 
       // Attendance successfully recorded
       return { message: `Verified: ${student.name} (${student.index}) — Attendance marked for ${result.courseCode} at ${result.time}`, courseCode: result.courseCode, recorded: true };
     } catch (error) {
-      if (error instanceof Error && /not recognized/i.test(error.message)) {
-        throw error; // Don't fall through — this is a real biometric mismatch
+      // Real biometric mismatch — propagate to UI
+      if (error instanceof Error && /not recognized|attendance recording failed/i.test(error.message)) {
+        throw error;
       }
-      // Fall through to offline fallback for network errors
+      // Fall through to offline fallback for network errors only
     }
   }
 
@@ -652,27 +659,40 @@ export const enrollFingerprint = async (studentId: string, fingerprintData?: str
   }
 };
 
-export const fetchReports = async (course: string, date: string) => {
+export const fetchReports = async (course: string, date: string, sessionId?: string | null) => {
   try {
     // Use the proper backend report endpoint with JOINed student data
     const params = new URLSearchParams();
     if (course) params.set('courseCode', course);
     if (date) params.set('date', date);
+    if (sessionId) params.set('sessionId', sessionId);
     const response = await requestAttendance(`/reports?${params.toString()}`);
     const records = await response.json();
     return Array.isArray(records) ? records : [];
   } catch {
     // Offline fallback: load from IndexedDB and filter locally
     const db = await initDB();
-    const [allAttendance, allStudents] = await Promise.all([
+    const [allAttendance, allStudents, allSessions] = await Promise.all([
       db.getAll('attendance'),
       db.getAll('students'),
+      db.getAll('sessions'),
     ]);
+
+    // If a session is active, resolve its course+date for precise filtering
+    let effectiveCourse = course;
+    let effectiveDate = date;
+    if (sessionId && !course && !date) {
+      const activeSession = allSessions.find((s: any) => String(s.id) === String(sessionId));
+      if (activeSession) {
+        effectiveCourse = activeSession.courseCode || effectiveCourse;
+        effectiveDate = activeSession.date || effectiveDate;
+      }
+    }
 
     // Filter locally with proper AND logic
     const records = allAttendance.filter((a: any) => {
-      const dateMatch = !date || a.date === date;
-      const courseMatch = !course || a.courseCode === course;
+      const dateMatch = !effectiveDate || a.date === effectiveDate;
+      const courseMatch = !effectiveCourse || a.courseCode === effectiveCourse;
       return dateMatch && courseMatch;
     });
 
@@ -714,10 +734,19 @@ export const fetchSessions = async () => {
 
 export const createSession = async (session: any) => {
   try {
+    // Map camelCase (frontend) → snake_case (backend MySQL)
+    const payload = {
+      id: session.id,
+      course: session.course,
+      course_code: session.courseCode,
+      session_date: session.date,
+      session_time: session.time,
+      hall: session.hall,
+    };
     const response = await requestAttendance('/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(session),
+      body: JSON.stringify(payload),
     });
     return response.json();
   } catch {
@@ -921,6 +950,94 @@ export const pushAllToMySQL = async (payload: {
   }
 };
 
+// ── Student Course Enrollment ──
+
+export const fetchCourseEnrollments = async (courseCode?: string) => {
+  try {
+    const params = courseCode ? `?courseCode=${encodeURIComponent(courseCode)}` : '';
+    const response = await requestAttendance(`/student-courses${params}`);
+    return response.json();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to fetch enrollments';
+    throw new Error(message);
+  }
+};
+
+export const fetchEnrolledCourses = async (): Promise<string[]> => {
+  try {
+    const response = await requestAttendance('/student-courses/courses');
+    const data = await response.json();
+    return Array.isArray(data.courses) ? data.courses : [];
+  } catch {
+    return [];
+  }
+};
+
+export const assignStudentsToCourse = async (courseCode: string, studentIds: string[]) => {
+  try {
+    const response = await requestAttendance('/student-courses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ courseCode, studentIds }),
+    });
+    const result = await response.json();
+    if (result.errors && result.errors.length > 0) {
+      const detail = result.errors.slice(0, 5).join('; ');
+      if (result.added === 0) {
+        throw new Error(`None added. ${detail}`);
+      }
+      // Partial success — return with warnings
+      result._warnings = detail;
+    }
+    if (result.added === 0 && result.skipped > 0 && !result.errors) {
+      throw new Error('None of the selected students could be added. Check student IDs.');
+    }
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to assign students';
+    throw new Error(message);
+  }
+};
+
+export const removeStudentsFromCourse = async (courseCode: string, studentIds: string[]) => {
+  try {
+    const response = await requestAttendance('/student-courses', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ courseCode, studentIds }),
+    });
+    return response.json();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to remove students';
+    throw new Error(message);
+  }
+};
+
+// ── Session Locks ──
+
+export const lockSession = async (sessionId: number, username: string, role: string) => {
+  const response = await requestAttendance('/session-lock', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, username, role }),
+  });
+  return response.json();
+};
+
+export const unlockSession = async (sessionId: number, username: string, role: string) => {
+  const response = await requestAttendance(`/session-lock/${sessionId}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, role }),
+  });
+  return response.json();
+};
+
+export const checkSessionLock = async (sessionId: number) => {
+  const response = await requestAttendance(`/session-lock/${sessionId}`);
+  return response.json();
+};
+
 // ── Admin: Invigilator Management ──
 
 export const fetchInvigilators = async () => {
@@ -968,6 +1085,7 @@ export const storeMalpracticeEvent = async (payload: {
   severity: 'low' | 'medium' | 'high';
   suspicionScore: number;
   detail: string;
+  sessionId?: string;
 }) => {
   try {
     await requestAttendance('/scan-events', {
@@ -977,6 +1095,7 @@ export const storeMalpracticeEvent = async (payload: {
         studentId: payload.studentId,
         date: todayIso(),
         time: nowTime(),
+        sessionId: payload.sessionId,
         result: 'failed',
         reason: `malpractice:${payload.eventType}|severity:${payload.severity}|score:${payload.suspicionScore}|${payload.detail}`,
       }),
@@ -987,6 +1106,7 @@ export const storeMalpracticeEvent = async (payload: {
       studentId: payload.studentId,
       date: todayIso(),
       time: nowTime(),
+      sessionId: payload.sessionId,
       result: 'failed',
       reason: `malpractice:${payload.eventType}|severity:${payload.severity}|score:${payload.suspicionScore}|${payload.detail}`,
     });

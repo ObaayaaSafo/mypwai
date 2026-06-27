@@ -72,81 +72,80 @@ const SyncStatusBanner: React.FC = () => {
   const getStyle = (): React.CSSProperties => {
     const base: React.CSSProperties = {
       position: 'fixed',
-      bottom: 0,
-      left: 0,
-      right: 0,
+      bottom: '12px',
+      left: '12px',
       zIndex: 9999,
-      padding: '8px 16px',
-      display: 'flex',
-      justifyContent: 'space-between',
+      padding: '5px 12px',
+      borderRadius: '8px',
+      display: 'inline-flex',
       alignItems: 'center',
-      fontSize: '13px',
+      gap: '6px',
+      fontSize: '11px',
       fontWeight: 500,
       fontFamily: "'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif",
       transition: 'all 0.3s ease',
-      boxShadow: '0 -4px 20px rgba(0,0,0,0.35)',
+      boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+      maxWidth: '320px',
     };
 
     switch (status.type) {
       case 'syncing':
-        return { ...base, backgroundColor: '#1E3A5F', color: '#93C5FD', borderTop: '2px solid #3B82F6' };
+        return { ...base, backgroundColor: '#1E3A5F', color: '#93C5FD', border: '1px solid #3B82F6' };
       case 'success':
-        return { ...base, backgroundColor: '#134E4A', color: '#5EEAD4', borderTop: '2px solid #0F766E' };
+        return { ...base, backgroundColor: '#134E4A', color: '#5EEAD4', border: '1px solid #0F766E' };
       case 'error':
-        return { ...base, backgroundColor: '#7F1D1D', color: '#FCA5A5', borderTop: '2px solid #DC2626' };
+        return { ...base, backgroundColor: '#7F1D1D', color: '#FCA5A5', border: '1px solid #DC2626' };
       case 'offline':
-        return { ...base, backgroundColor: '#78350F', color: '#FCD34D', borderTop: '2px solid #D97706' };
+        return { ...base, backgroundColor: '#78350F', color: '#FCD34D', border: '1px solid #D97706' };
       default:
-        return { ...base, backgroundColor: 'var(--card)', color: 'var(--muted)', borderTop: '2px solid var(--border)' };
+        return { ...base, backgroundColor: 'var(--card)', color: 'var(--muted)', border: '1px solid var(--border)' };
     }
   };
 
-  // Don't show anything if idle and never synced
-  if (status.type === 'idle' && !status.lastSync && !isSyncInProgress()) {
+  // Only show during sync, errors, or when offline — hide when idle/normal
+  if (status.type === 'idle') {
     return null;
   }
 
   return (
     <div className="sync-banner-enter" style={getStyle()}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-        {status.type === 'syncing' && (
-          <span style={{
-            width: '12px', height: '12px',
-            border: '2px solid #3B82F6',
-            borderTop: '2px solid transparent',
-            borderRadius: '50%',
-            animation: 'syncSpin 0.8s linear infinite',
-            display: 'inline-block',
-          }} />
-        )}
-        <span>{status.message}</span>
-        {status.lastSync && (
-          <span style={{ opacity: 0.7, marginLeft: '8px' }}>
-            (Last sync: {status.lastSync})
-          </span>
-        )}
-      </div>
-      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-        {status.lastSync && (
-          <button
-            onClick={() => syncToMySQL()}
-            disabled={isSyncInProgress()}
-            style={{
-              padding: '4px 12px',
-              borderRadius: '4px',
-              border: '1px solid currentColor',
-              background: 'transparent',
-              color: 'inherit',
-              cursor: isSyncInProgress() ? 'not-allowed' : 'pointer',
-              fontSize: '12px',
-              fontWeight: 600,
-              opacity: isSyncInProgress() ? 0.5 : 1,
-            }}
-          >
-            {isSyncInProgress() ? 'Syncing...' : 'Sync Now'}
-          </button>
-        )}
-      </div>
+      {status.type === 'syncing' && (
+        <span style={{
+          width: '10px', height: '10px',
+          border: '2px solid #3B82F6',
+          borderTop: '2px solid transparent',
+          borderRadius: '50%',
+          animation: 'syncSpin 0.8s linear infinite',
+          display: 'inline-block',
+          flexShrink: 0,
+        }} />
+      )}
+      <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{status.message}</span>
+      {status.lastSync && (
+        <span style={{ opacity: 0.6, whiteSpace: 'nowrap', fontSize: '10px' }}>
+          {status.lastSync}
+        </span>
+      )}
+      {status.lastSync && (
+        <button
+          onClick={() => syncToMySQL()}
+          disabled={isSyncInProgress()}
+          style={{
+            padding: '2px 8px',
+            borderRadius: '4px',
+            border: '1px solid currentColor',
+            background: 'transparent',
+            color: 'inherit',
+            cursor: isSyncInProgress() ? 'not-allowed' : 'pointer',
+            fontSize: '10px',
+            fontWeight: 600,
+            opacity: isSyncInProgress() ? 0.5 : 1,
+            flexShrink: 0,
+          }}
+        >
+          {isSyncInProgress() ? '...' : 'Sync'}
+        </button>
+      )}
       <style>{`
         @keyframes syncSpin {
           0% { transform: rotate(0deg); }

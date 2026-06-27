@@ -1,10 +1,29 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { fetchReports, fetchMalpracticeEvents, fetchMalpracticeSummary } from '../apiExtra';
 
 const todayStr = () => new Date().toISOString().split('T')[0];
 
 const ReportingPage: React.FC = () => {
+  const userRole = localStorage.getItem('userRole');
+  const activeSessionId = localStorage.getItem('activeSessionId');
+  const activeSessionLabel = localStorage.getItem('activeSessionLabel') || '';
+
+  // For admins: toggle between session-scoped and all-sessions view
+  const [viewAllSessions, setViewAllSessions] = useState(false);
+  const isAdmin = userRole === 'admin';
+
   const [filters, setFilters] = useState({ course: '', date: todayStr() });
+
+  // ── Auto-populate filters from active session for invigilators ──
+  React.useEffect(() => {
+    if (!isAdmin && activeSessionId) {
+      const storedCourseCode = localStorage.getItem('activeSessionCourseCode') || '';
+      const storedDate = localStorage.getItem('activeSessionDate') || '';
+      if (storedCourseCode || storedDate) {
+        setFilters({ course: storedCourseCode, date: storedDate || todayStr() });
+      }
+    }
+  }, []); // run once on mount
   const [reports, setReports] = useState<any[]>([]);
   const [malpracticeEvents, setMalpracticeEvents] = useState<any[]>([]);
   const [malpracticeSummary, setMalpracticeSummary] = useState<any>(null);
@@ -14,15 +33,23 @@ const ReportingPage: React.FC = () => {
   const [error, setError] = useState('');
   const [showMalpractice, setShowMalpractice] = useState(true);
 
-  const handleSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const getEffectiveSessionId = () => {
+    // For invigilators: always use the active session
+    // For admins: only use active session when NOT viewing all sessions
+    if (!isAdmin) return activeSessionId;
+    return viewAllSessions ? null : activeSessionId;
+  };
+
+  const handleSearch = async (e: React.FormEvent, overrideAll?: boolean) => {
+    if (e) e.preventDefault();
     setLoading(true);
     setError('');
     try {
+      const sessionId = overrideAll === true ? null : getEffectiveSessionId();
       const [data, malpEvents, malpSummary] = await Promise.all([
-        fetchReports(filters.course, filters.date),
-        fetchMalpracticeEvents(filters.course, filters.date),
-        fetchMalpracticeSummary(filters.course, filters.date),
+        fetchReports(filters.course, filters.date, sessionId),
+        fetchMalpracticeEvents(filters.course, filters.date, sessionId),
+        fetchMalpracticeSummary(filters.course, filters.date, sessionId),
       ]);
       setReports(data);
       setMalpracticeEvents(malpEvents);
@@ -33,6 +60,19 @@ const ReportingPage: React.FC = () => {
       setError('Failed to load report. Make sure the backend is running.');
     }
     setLoading(false);
+  };
+
+  const handleViewToggle = (all: boolean) => {
+    setViewAllSessions(all);
+    setSearched(false);
+    if (!all && activeSessionId) {
+      // Read course info from dedicated localStorage keys
+      const storedCourseCode = localStorage.getItem('activeSessionCourseCode') || '';
+      const storedDate = localStorage.getItem('activeSessionDate') || '';
+      if (storedCourseCode || storedDate) {
+        setFilters({ course: storedCourseCode, date: storedDate || todayStr() });
+      }
+    }
   };
 
   const total = reports.length;
@@ -53,48 +93,66 @@ const ReportingPage: React.FC = () => {
   });
 
   const handleExport = () => {
-    const reportLines: string[] = [];
-    
-    reportLines.push('='.repeat(62));
-    reportLines.push('  ATTENDANCE REPORT');
-    reportLines.push('='.repeat(62));
-    reportLines.push(`  Course: ${filters.course || 'ALL'}     Date: ${filters.date}`);
-    reportLines.push(`  Generated: ${new Date().toLocaleString()}`);
-    reportLines.push('');
-    
-    reportLines.push('  SUMMARY');
-    reportLines.push('  ' + '-'.repeat(20));
-    reportLines.push(`  Total Students:    ${reports.length}`);
-    reportLines.push(`  Present:           ${present}`);
-    reportLines.push(`  Absent:            ${absent}`);
-    reportLines.push(`  Attendance Rate:   ${percentage}%`);
-    reportLines.push('');
-    
-    const separator = '  +' + '-'.repeat(14) + '+' + '-'.repeat(22) + '+' + '-'.repeat(10) + '+' + '-'.repeat(10) + '+';
-    const headerRow = '  | Student ID' + ' '.repeat(4) + '| Name' + ' '.repeat(18) + '| Status' + ' '.repeat(4) + '| Time' + ' '.repeat(6) + '|';
-    
-    reportLines.push(separator);
-    reportLines.push(headerRow);
-    reportLines.push(separator);
-    
-    reports.forEach(r => {
-      const id = (r.studentId || '').padEnd(14).substring(0, 14);
-      const name = (r.name || '').padEnd(22).substring(0, 22);
-      const status = (r.status || '').padEnd(10).substring(0, 10);
-      const time = (r.time || '').padEnd(10).substring(0, 10);
-      reportLines.push(`  | ${id}| ${name}| ${status}| ${time}|`);
-    });
-    
-    reportLines.push(separator);
-    reportLines.push('');
-    reportLines.push('  -- End of Report --');
-    
-    const textContent = reportLines.join('\n');
-    const blob = new Blob([textContent], { type: 'text/plain;charset=utf-8;' });
+    // Read course info from dedicated localStorage keys (set by ExamSetupPage)
+    const storedCourse = localStorage.getItem('activeSessionCourse') || '';
+    const storedCourseCode = localStorage.getItem('activeSessionCourseCode') || '';
+
+    const courseName = storedCourse || '';
+    const courseCode = storedCourseCode || filters.course || (reports.length > 0 && reports[0].courseCode) || '';
+
+    const presentStudents = reports.filter(r => r.status === 'Present');
+    const summaryRows = [
+      ['Course Name', courseName],
+      ['Course Code', courseCode],
+      ['Date', filters.date],
+      ['Generated', new Date().toLocaleString()],
+      [''],
+      ['Total Students', String(reports.length)],
+      ['Present', String(presentStudents.length)],
+      ['Absent', String(absent)],
+      ['Attendance Rate', `${percentage}%`],
+      [''],
+    ];
+
+    const escapeCSV = (val: string) => {
+      if (val.includes(',') || val.includes('"') || val.includes('\n')) {
+        return `"${val.replace(/"/g, '""')}"`;
+      }
+      return val;
+    };
+
+    const lines: string[] = [];
+    for (const row of summaryRows) {
+      lines.push(row.map(escapeCSV).join(','));
+    }
+
+    // Column headers
+    lines.push(['Student ID', 'Name', 'Status', 'Time'].map(escapeCSV).join(','));
+
+    for (const r of reports) {
+      lines.push([
+        escapeCSV(r.studentId || ''),
+        escapeCSV(r.name || ''),
+        escapeCSV(r.status || ''),
+        escapeCSV(r.time || ''),
+      ].join(','));
+    }
+
+    const csvContent = lines.join('\n');
+    const bom = '\uFEFF';
+    const blob = new Blob([bom + csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `attendance_report_${filters.date}.txt`;
+    const filename = courseCode ? `attendance_${courseCode}_${filters.date}.csv` : `attendance_report_${filters.date}.csv`;
+    link.download = filename;
     link.click();
+  };
+
+  // Determines the scope label for display
+  const getScopeLabel = () => {
+    if (isAdmin && viewAllSessions) return 'All Sessions';
+    if (activeSessionId) return activeSessionLabel;
+    return 'No Session Selected';
   };
 
   return (
@@ -107,16 +165,94 @@ const ReportingPage: React.FC = () => {
           .print-container { padding: 0 !important; margin: 0 !important; max-width: 100% !important; }
         }
       `}</style>
-      <h2 className="animate-fade-in-up" style={{ marginBottom: '1rem', color: 'var(--accent)' }}>Attendance Reports</h2>
+      <h2 className="animate-fade-in-up" style={{ marginBottom: '0.5rem', color: 'var(--accent)' }}>Attendance Reports</h2>
+
+      {/* Scope Banner */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: '0.75rem',
+        marginBottom: '1.25rem', flexWrap: 'wrap',
+      }}>
+        {/* Session scope badge */}
+        <div style={{
+          background: isAdmin && viewAllSessions
+            ? 'rgba(59,130,246,0.12)'
+            : activeSessionId
+              ? 'linear-gradient(135deg, rgba(15,118,110,0.15), rgba(45,212,191,0.08))'
+              : 'rgba(242,114,41,0.08)',
+          border: isAdmin && viewAllSessions
+            ? '1px solid rgba(59,130,246,0.25)'
+            : activeSessionId
+              ? '1px solid rgba(94,234,212,0.25)'
+              : '1px solid rgba(242,114,41,0.2)',
+          borderRadius: '999px',
+          padding: '0.35rem 1rem',
+          fontSize: '0.85rem',
+          fontWeight: 600,
+          color: isAdmin && viewAllSessions ? '#93C5FD' : activeSessionId ? '#5EEAD4' : '#F59E0B',
+          display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
+        }}>
+          <span style={{
+            width: '8px', height: '8px', borderRadius: '50%',
+            background: isAdmin && viewAllSessions ? '#3B82F6' : activeSessionId ? '#5EEAD4' : '#F59E0B',
+            boxShadow: `0 0 6px ${isAdmin && viewAllSessions ? '#3B82F6' : activeSessionId ? '#5EEAD4' : '#F59E0B'}`,
+          }} />
+          {getScopeLabel()}
+        </div>
+
+        {/* Admin: toggle All Sessions / My Session */}
+        {isAdmin && (
+          <div style={{ display: 'flex', gap: '0.25rem', background: 'var(--input-bg)', borderRadius: '999px', padding: '2px' }}>
+            <button
+              onClick={() => handleViewToggle(false)}
+              style={{
+                padding: '0.35rem 0.9rem',
+                borderRadius: '999px',
+                border: 'none',
+                cursor: 'pointer',
+                fontSize: '0.8rem',
+                fontWeight: 600,
+                background: !viewAllSessions ? 'var(--card-solid)' : 'transparent',
+                color: !viewAllSessions ? 'var(--text)' : 'var(--muted)',
+                transition: 'all 0.2s',
+              }}
+            >
+              My Session
+            </button>
+            <button
+              onClick={() => handleViewToggle(true)}
+              style={{
+                padding: '0.35rem 0.9rem',
+                borderRadius: '999px',
+                border: 'none',
+                cursor: 'pointer',
+                fontSize: '0.8rem',
+                fontWeight: 600,
+                background: viewAllSessions ? 'var(--card-solid)' : 'transparent',
+                color: viewAllSessions ? 'var(--text)' : 'var(--muted)',
+                transition: 'all 0.2s',
+              }}
+            >
+              All Sessions
+            </button>
+          </div>
+        )}
+
+        {/* Invigilator: no session warning */}
+        {!isAdmin && !activeSessionId && (
+          <span style={{ color: '#F59E0B', fontSize: '0.8rem', fontWeight: 500 }}>
+            Go to <strong>Exams</strong> to select a session first.
+          </span>
+        )}
+      </div>
       
       <form className="no-print card card-accent-hover" onSubmit={handleSearch} style={{ padding: '1rem', display: 'flex', gap: '0.75rem', alignItems: 'flex-end', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
         <div style={{ flex: 1, minWidth: '150px' }}>
           <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Course Code <span style={{fontWeight:400, color:'var(--muted)'}}>(optional)</span></label>
-          <input type="text" value={filters.course} placeholder="e.g. CSC101" onChange={e => setFilters({...filters, course: e.target.value})} className="input" style={{ width: '100%' }} />
+          <input type="text" value={filters.course} placeholder="e.g. CSC101" onChange={e => setFilters({...filters, course: e.target.value})} className="input" style={{ width: '100%' }} disabled={!viewAllSessions && !!activeSessionId} />
         </div>
         <div style={{ flex: 1, minWidth: '150px' }}>
           <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Date</label>
-          <input type="date" value={filters.date} onChange={e => setFilters({...filters, date: e.target.value})} className="input" style={{ width: '100%' }} />
+          <input type="date" value={filters.date} onChange={e => setFilters({...filters, date: e.target.value})} className="input" style={{ width: '100%' }} disabled={!viewAllSessions && !!activeSessionId} />
         </div>
         <button type="submit" disabled={loading} className="btn btn-secondary">{loading ? 'Loading...' : 'Generate Report'}</button>
       </form>
