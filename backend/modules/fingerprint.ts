@@ -1,8 +1,8 @@
 // Index: ensureReady():15 | ensureTable():51 | loadTemplatesFromDB():68 | GET /status:86 | POST /init:98
-//        POST /shutdown:107 | POST /capture:118 | POST /enroll:133 | POST /verify:192 | POST /reload:238
-//        DELETE /template/:studentId:249 | GET /enrolled:268
+//        POST /shutdown:107 | POST /capture:118 | POST /enroll:133 | POST /verify:170 | POST /reload:298
+//        DELETE /template/:studentId:309 | GET /enrolled:328 | GET /debug:342
 import express from 'express';
-import { query } from '../db.js';
+import { query, exec, transaction } from '../db.js';
 import {
   zkInit, zkTerminate, zkGetDeviceCount, zkOpenDevice, zkCloseDevice,
   zkInitDB, zkCapture, zkIdentify, zkLoadTemplates, zkAddTemplate,
@@ -155,9 +155,14 @@ router.post('/enroll', async (req, res) => {
     const added = zkAddTemplate(fid, captureResult.templateBase64);
     console.log(`[Fingerprint] Enroll ${studentId}: fid=${fid}, added=${added}, total=${zkGetCount()}`);
 
-    await query('UPDATE students SET fingerprint_enrolled = TRUE WHERE index_no = ?', [studentId]);
+    const updateResult = await query('UPDATE students SET fingerprint_enrolled = TRUE WHERE index_no = ?', [studentId]) as any;
+    const rowsAffected = updateResult?.affectedRows ?? 0;
+    console.log(`[Fingerprint] Enroll ${studentId}: UPDATE affectedRows=${rowsAffected}`);
+    if (rowsAffected === 0) {
+      console.warn(`[Fingerprint] Enroll ${studentId}: WARNING - no student found with index_no='${studentId}'`);
+    }
 
-    res.json({ success: true, message: 'Fingerprint enrolled successfully', templateCount: zkGetCount(), fid });
+    res.json({ success: true, message: 'Fingerprint enrolled successfully', templateCount: zkGetCount(), fid, studentFound: rowsAffected > 0 });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 
@@ -176,16 +181,78 @@ router.post('/verify', async (req, res) => {
     }
 
     const match = zkIdentify(captureResult.templateBase64);
-    if (!match) return res.json({ matched: false, message: 'Fingerprint not recognized' });
+    if (!match) {
+      // Log failed scan event
+      try {
+        await exec(
+          "INSERT INTO scan_events (course_code, event_date, event_time, result, reason) VALUES (?, ?, ?, ?, ?)",
+          [null, new Date().toISOString().split('T')[0], new Date().toTimeString().split(' ')[0], 'failed', 'fingerprint_not_recognized']
+        );
+      } catch { /* non-critical */ }
+      return res.json({ matched: false, message: 'Fingerprint not recognized' });
+    }
 
     const rows = await query(
-      'SELECT s.index_no, s.name, s.programme, s.level FROM fingerprints f JOIN students s ON s.index_no = f.student_id WHERE f.fid = ?',
+      'SELECT s.id, s.index_no, s.name, s.programme, s.level FROM fingerprints f JOIN students s ON s.index_no = f.student_id WHERE f.fid = ?',
       [match.fid]) as any[];
 
-    if (rows.length === 0) return res.json({ matched: false, message: 'No student record', fid: match.fid, score: match.score });
+    if (rows.length === 0) {
+      try {
+        await exec(
+          "INSERT INTO scan_events (course_code, event_date, event_time, result, reason) VALUES (?, ?, ?, ?, ?)",
+          [null, new Date().toISOString().split('T')[0], new Date().toTimeString().split(' ')[0], 'failed', 'student_not_found']
+        );
+      } catch { /* non-critical */ }
+      return res.json({ matched: false, message: 'No student record', fid: match.fid, score: match.score });
+    }
 
     const student = rows[0];
-    res.json({ matched: true, student: { index: student.index_no, name: student.name, programme: student.programme, level: student.level }, score: match.score, fid: match.fid });
+    const now = new Date();
+    const today = now.toISOString().split('T')[0];
+    const nowTime = now.toTimeString().split(' ')[0]; // HH:MM:SS 24h format
+
+    // Get active session for today
+    const todaySessions = await query(
+      'SELECT course_code FROM sessions WHERE session_date = ? LIMIT 1',
+      [today]
+    ) as { course_code: string }[];
+    const courseCode = todaySessions[0]?.course_code || 'DEMO101';
+
+    // Check for duplicate attendance
+    const duplicates = await query(
+      'SELECT id FROM attendance WHERE student_id = ? AND course_code = ? AND attendance_date = ? AND status = ?',
+      [student.id, courseCode, today, 'Present']
+    ) as { id: number }[];
+
+    if (duplicates.length > 0) {
+      try {
+        await exec(
+          "INSERT INTO scan_events (student_id, course_code, event_date, event_time, result, reason) VALUES (?, ?, ?, ?, ?, ?)",
+          [student.id, courseCode, today, nowTime, 'duplicate', 'duplicate_check_in']
+        );
+      } catch { /* non-critical */ }
+      return res.json({ matched: true, student: { index: student.index_no, name: student.name, programme: student.programme, level: student.level }, score: match.score, fid: match.fid, attendance: 'duplicate', courseCode });
+    }
+
+    // Record attendance + scan event in a transaction
+    try {
+      await transaction(async (conn) => {
+        await conn.execute(
+          'INSERT INTO attendance (student_id, course_code, attendance_date, attendance_time, status) VALUES (?, ?, ?, ?, ?)',
+          [student.id, courseCode, today, nowTime, 'Present']
+        );
+        await conn.execute(
+          'INSERT INTO scan_events (student_id, course_code, event_date, event_time, result) VALUES (?, ?, ?, ?, ?)',
+          [student.id, courseCode, today, nowTime, 'success']
+        );
+      });
+    } catch (err: any) {
+      console.error(`[Fingerprint] Attendance record failed: ${err.message}`);
+      return res.json({ matched: true, student: { index: student.index_no, name: student.name, programme: student.programme, level: student.level }, score: match.score, fid: match.fid, attendance: 'error', error: err.message });
+    }
+
+    console.log(`[Fingerprint] Attendance recorded: ${student.name} (${student.index_no}) for ${courseCode}`);
+    res.json({ matched: true, student: { index: student.index_no, name: student.name, programme: student.programme, level: student.level }, score: match.score, fid: match.fid, attendance: 'recorded', courseCode, time: nowTime });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 

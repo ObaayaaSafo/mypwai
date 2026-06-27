@@ -1,3 +1,8 @@
+// Index: GET /students:56 | POST /students:72 | DELETE /students/:index:148 | GET /sessions:169
+//        POST /sessions:177 | DELETE /sessions/:id:201 | GET /attendance:211 | POST /attendance:219
+//        GET /scan-events:237 | POST /scan-events:247 | POST /verify:260
+//        GET /malpractice:244 | GET /malpractice-summary:303 | GET /reports:512 | GET /summary:578
+//        GET /export:348 | POST /import:361
 import express from 'express';
 import { query, exec, transaction } from '../db.js';
 import type { Connection } from 'mysql2/promise';
@@ -44,7 +49,7 @@ type ScanEvent = {
 const router = express.Router();
 
 const todayIso = () => new Date().toISOString().split('T')[0] || '1970-01-01';
-const nowTime = () => new Date().toLocaleTimeString();
+const nowTime = () => new Date().toTimeString().split(' ')[0]; // HH:MM:SS 24h
 
 const hasPhoto = (photoUrl?: string | null) => typeof photoUrl === 'string' && photoUrl.trim().length > 0;
 
@@ -231,6 +236,111 @@ router.get('/scan-events', async (_req, res) => {
     res.json(events);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to fetch scan events';
+    res.status(500).json({ message });
+  }
+});
+
+// ========== MALPRACTICE QUERIES ==========
+
+/**
+ * GET /api/attendance/malpractice?courseCode=&date=
+ * Extracts malpractice events from scan_events (stored with reason prefix 'malpractice:')
+ */
+router.get('/malpractice', async (req, res) => {
+  try {
+    const courseCode = typeof req.query.courseCode === 'string' ? req.query.courseCode.trim() : '';
+    const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
+
+    let sql = `
+      SELECT se.id, se.student_id, se.course_code, se.event_date, se.event_time, se.reason,
+             s.index_no, s.name
+      FROM scan_events se
+      LEFT JOIN students s ON s.id = se.student_id
+      WHERE se.reason LIKE 'malpractice:%'
+    `;
+    const params: any[] = [];
+
+    if (courseCode) { sql += ' AND se.course_code = ?'; params.push(courseCode); }
+    if (date) { sql += ' AND se.event_date = ?'; params.push(date); }
+    sql += ' ORDER BY se.event_date DESC, se.event_time DESC LIMIT 200';
+
+    const rows = await query(sql, params) as any[];
+
+    // Parse the compound reason string: malpractice:<eventType>|severity:<severity>|score:<score>|<detail>
+    const events = rows.map((r: any) => {
+      const reason = String(r.reason || '');
+      const parts: Record<string, string> = {};
+      reason.split('|').forEach((segment: string) => {
+        const [key, ...rest] = segment.split(':');
+        if (key && rest.length > 0) parts[key.trim()] = rest.join(':').trim();
+      });
+
+      return {
+        id: r.id,
+        studentId: r.index_no || (r.student_id ? String(r.student_id) : null),
+        studentName: r.name || 'Unknown',
+        courseCode: r.course_code,
+        date: r.event_date,
+        time: r.event_time,
+        eventType: parts.malpractice || 'unknown',
+        severity: parts.severity || 'low',
+        score: parseFloat(parts.score || '0'),
+        detail: parts[''] || reason.replace(/^malpractice:.*?\|/, ''),
+      };
+    });
+
+    res.json(events);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to fetch malpractice events';
+    res.status(500).json({ message });
+  }
+});
+
+/**
+ * GET /api/attendance/malpractice-summary?courseCode=&date=
+ * Aggregated malpractice stats
+ */
+router.get('/malpractice-summary', async (req, res) => {
+  try {
+    const courseCode = typeof req.query.courseCode === 'string' ? req.query.courseCode.trim() : '';
+    const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
+
+    let sql = `
+      SELECT reason FROM scan_events
+      WHERE reason LIKE 'malpractice:%'
+    `;
+    const params: any[] = [];
+    if (courseCode) { sql += ' AND course_code = ?'; params.push(courseCode); }
+    if (date) { sql += ' AND event_date = ?'; params.push(date); }
+
+    const rows = await query(sql, params) as any[];
+
+    const byType: Record<string, number> = {};
+    const bySeverity: Record<string, number> = { high: 0, medium: 0, low: 0 };
+    const flaggedStudents = new Set<string>();
+
+    rows.forEach((r: any) => {
+      const reason = String(r.reason || '');
+      const parts: Record<string, string> = {};
+      reason.split('|').forEach((segment: string) => {
+        const [key, ...rest] = segment.split(':');
+        if (key && rest.length > 0) parts[key.trim()] = rest.join(':').trim();
+      });
+
+      const type = parts.malpractice || 'unknown';
+      const severity = (parts.severity || 'low') as string;
+      byType[type] = (byType[type] || 0) + 1;
+      if (severity in bySeverity) bySeverity[severity]++;
+    });
+
+    res.json({
+      totalEvents: rows.length,
+      byType,
+      bySeverity,
+      topTypes: Object.entries(byType).sort((a, b) => b[1] - a[1]).slice(0, 8),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to get malpractice summary';
     res.status(500).json({ message });
   }
 });
@@ -499,6 +609,115 @@ router.post('/import', async (req, res) => {
     return res.json({ success: true, ...result });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Import failed';
+    res.status(500).json({ message });
+  }
+});
+
+// ========== REPORTS ==========
+
+/**
+ * GET /api/attendance/reports?courseCode=&date=
+ * Returns attendance records JOINed with student info, properly filtered.
+ */
+router.get('/reports', async (req, res) => {
+  try {
+    const courseCode = typeof req.query.courseCode === 'string' ? req.query.courseCode.trim() : '';
+    const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
+
+    let sql = `
+      SELECT a.id, a.course_code, a.attendance_date, a.attendance_time, a.status,
+             s.index_no, s.name, s.programme, s.level
+      FROM attendance a
+      JOIN students s ON s.id = a.student_id
+      WHERE 1=1
+    `;
+    const params: any[] = [];
+
+    if (courseCode) {
+      sql += ' AND a.course_code = ?';
+      params.push(courseCode);
+    }
+    if (date) {
+      sql += ' AND a.attendance_date = ?';
+      params.push(date);
+    }
+
+    sql += ' ORDER BY a.attendance_time ASC';
+
+    const rows = await query(sql, params) as any[];
+
+    const records = rows.map((r: any) => ({
+      studentId: r.index_no,
+      name: r.name,
+      programme: r.programme || '',
+      level: r.level || '',
+      status: r.status,
+      time: r.attendance_time,
+      date: r.attendance_date,
+      courseCode: r.course_code,
+    }));
+
+    // Get all students to fill in absentees
+    const allStudents = await query('SELECT index_no, name, programme, level FROM students ORDER BY index_no') as any[];
+    const presentIds = new Set(records.map((r: any) => r.studentId));
+    const absentRecords = allStudents
+      .filter((s: any) => !presentIds.has(s.index_no))
+      .map((s: any) => ({
+        studentId: s.index_no,
+        name: s.name,
+        programme: s.programme || '',
+        level: s.level || '',
+        status: 'Absent',
+        time: '-',
+        date: date || '',
+        courseCode: courseCode || '',
+      }));
+
+    const allRecords = [...records, ...absentRecords].sort((a, b) => a.studentId.localeCompare(b.studentId));
+
+    res.json(allRecords);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to generate report';
+    res.status(500).json({ message });
+  }
+});
+
+/**
+ * GET /api/attendance/summary — Quick stats for the dashboard/reporting
+ */
+router.get('/summary', async (req, res) => {
+  try {
+    const courseCode = typeof req.query.courseCode === 'string' ? req.query.courseCode.trim() : '';
+    const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
+
+    const totalStudents = (await query('SELECT COUNT(*) AS cnt FROM students') as any[])[0]?.cnt ?? 0;
+
+    let presentSql = 'SELECT COUNT(*) AS cnt FROM attendance WHERE status = ?';
+    const params: any[] = ['Present'];
+    if (courseCode) { presentSql += ' AND course_code = ?'; params.push(courseCode); }
+    if (date) { presentSql += ' AND attendance_date = ?'; params.push(date); }
+    const presentCount = (await query(presentSql, params) as any[])[0]?.cnt ?? 0;
+
+    const firstArrival = date
+      ? (await query(
+          'SELECT MIN(attendance_time) AS t FROM attendance WHERE attendance_date = ? AND status = ?' + (courseCode ? ' AND course_code = ?' : ''),
+          courseCode ? [date, 'Present', courseCode] : [date, 'Present']
+        ) as any[])[0]?.t || '-'
+      : '-';
+
+    const lastArrival = date
+      ? (await query(
+          'SELECT MAX(attendance_time) AS t FROM attendance WHERE attendance_date = ? AND status = ?' + (courseCode ? ' AND course_code = ?' : ''),
+          courseCode ? [date, 'Present', courseCode] : [date, 'Present']
+        ) as any[])[0]?.t || '-'
+      : '-';
+
+    const absentCount = totalStudents - presentCount;
+    const rate = totalStudents > 0 ? Math.round((presentCount / totalStudents) * 100) : 0;
+
+    res.json({ totalStudents, presentCount, absentCount, attendanceRate: rate, firstArrival, lastArrival });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to get summary';
     res.status(500).json({ message });
   }
 });

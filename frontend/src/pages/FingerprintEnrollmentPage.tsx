@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { enrollFingerprint } from '../apiExtra';
+import { fetchStudents } from '../api';
 import { FingerprintCapture, ScannerService, ScannerDeviceInfo } from '../scannerService';
 
 const enrollmentSteps = ['Connect scanner', 'Capture primary print', 'Assess quality', 'Store enrollment template'];
@@ -111,6 +112,19 @@ const FingerprintEnrollmentPage: React.FC = () => {
     if (!studentId.trim()) {
       setStatus('Enter a student ID before starting enrollment.');
       return;
+    }
+
+    // Verify student exists before attempting fingerprint capture
+    try {
+      const allStudents = await fetchStudents();
+      const found = allStudents.some((s: any) => s.index === studentId.trim());
+      if (!found) {
+        setStatus(`Student ID "${studentId.trim()}" is not registered. Please add the student first in Student Management.`);
+        playErrorSound();
+        return;
+      }
+    } catch {
+      // If fetchStudents fails (backend down), proceed anyway — student may be in IndexedDB
     }
 
     setLoading(true);

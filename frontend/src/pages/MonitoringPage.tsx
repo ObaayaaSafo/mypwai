@@ -1,3 +1,6 @@
+// Index: MonitoringPage (1500 lines) — Key exports: startCamera:590 | stopCamera:608 | runFaceAnalysis:617
+//        addAlert:536 | identifyEnrolledFaces:363 | captureEvidence:527 | captureFrameBase64:778
+//        Hall grid UI:1285 | Malpractice event log UI:1412 | Risk scoring:170-230
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -21,7 +24,7 @@ type MalpracticeEvent = {
   hallId: string;
   studentId: string;
   faceId?: string;
-  eventType: 'multiple_faces' | 'candidate_interaction' | 'absence' | 'excessive_movement' | 'proxy_face_mismatch' | 'talking' | 'head_rotation';
+  eventType: 'multiple_faces' | 'candidate_interaction' | 'absence' | 'excessive_movement' | 'proxy_face_mismatch' | 'talking' | 'head_rotation' | 'unauthorized_material' | 'looking_around';
   suspicionScore: number;
   threshold: number;
   severity: Severity;
@@ -56,6 +59,8 @@ const malpracticeEventTypes: MalpracticeEvent['eventType'][] = [
   'proxy_face_mismatch',
   'talking',
   'head_rotation',
+  'unauthorized_material',
+  'looking_around',
 ];
 
 const externalCameraLabelPatterns = [
@@ -119,9 +124,12 @@ const MonitoringPage: React.FC = () => {
   const [enrolledFaces, setEnrolledFaces] = useState<RekognitionFace[]>([]);
   const [localFaceProfiles, setLocalFaceProfiles] = useState<FaceProfile[]>([]);
   const [loadingFaces, setLoadingFaces] = useState(false);
+  const [hallViewMode, setHallViewMode] = useState<'single' | 'grid'>('grid');
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const canvasRef2 = useRef<HTMLCanvasElement | null>(null);
+  const canvasRef3 = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const detectorRef = useRef<any>(null);
   const analysisBusyRef = useRef(false);
@@ -139,6 +147,7 @@ const MonitoringPage: React.FC = () => {
   const previousFaceCenterMapRef = useRef<Record<string, { x: number; y: number }>>({});
   const movementWindowByFaceRef = useRef<Record<string, number[]>>({});
   const largeMovementEventsByFaceRef = useRef<Record<string, number[]>>({});
+  const movementConsecutiveByFaceRef = useRef<Record<string, number>>({});
   const headTurnEventsByFaceRef = useRef<Record<string, number[]>>({});
   const lastHorizontalDirectionByFaceRef = useRef<Record<string, -1 | 0 | 1>>({});
   const mouthOpenWindowByFaceRef = useRef<Record<string, boolean[]>>({});
@@ -153,14 +162,17 @@ const MonitoringPage: React.FC = () => {
   const alertConfirmationRef = useRef<Record<string, { hits: number; lastSeen: number }>>({});
 
   const absenceThresholdSeconds = 30;
-  const movementThreshold = 120;
+  const movementThresholdRatio = 0.30;       // displacement must be >30% of face width
+  const movementMinAbsoluteThreshold = 60;    // minimum px for very small faces
+  const movementConsecutiveRequired = 3;      // consecutive frames required (not bursts)
 
   const startPreferredCamera = async () => {
+    // For exam hall: prefer wide external camera (environment), high resolution, uncropped
     const initialStream = await navigator.mediaDevices.getUserMedia({
       video: {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        facingMode: { ideal: 'user' },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        facingMode: { ideal: 'environment' },
       },
       audio: false,
     });
@@ -173,8 +185,8 @@ const MonitoringPage: React.FC = () => {
       return navigator.mediaDevices.getUserMedia({
         video: {
           deviceId: { exact: preferredDevice.deviceId },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
         },
         audio: false,
       });
@@ -183,9 +195,9 @@ const MonitoringPage: React.FC = () => {
     return initialStream;
   };
   const detectionIntervalMs = 500;
-  const headRotationThreshold = 45;
+  const headRotationThresholdRatio = 0.20;   // horizontal shift >20% of face width = head turn
+  const headTurnMinAbsoluteThreshold = 40;    // minimum px for very small faces
   const movementEventWindowMs = 6000;
-  const movementBurstsRequired = 3;
   const headTurnEventsRequired = 4;
   const talkingDetectionThreshold = 0.6;
   const alertDecayPerSecond = 1.4;
@@ -199,6 +211,8 @@ const MonitoringPage: React.FC = () => {
     proxy_face_mismatch: 2,
     talking: 3,
     head_rotation: 2,
+    unauthorized_material: 2,
+    looking_around: 2,
   };
 
   const minimumSuspicionByEvent: Record<MalpracticeEvent['eventType'], number> = {
@@ -209,6 +223,8 @@ const MonitoringPage: React.FC = () => {
     proxy_face_mismatch: 0.9,
     talking: 0.65,
     head_rotation: 0.9,
+    unauthorized_material: 0.9,
+    looking_around: 0.8,
   };
 
   const riskDeltaBySeverity: Record<Severity, number> = {
@@ -798,6 +814,7 @@ const MonitoringPage: React.FC = () => {
       previousFaceCenterMapRef.current = {};
       movementWindowByFaceRef.current = {};
       largeMovementEventsByFaceRef.current = {};
+      movementConsecutiveByFaceRef.current = {};
       headTurnEventsByFaceRef.current = {};
       lastHorizontalDirectionByFaceRef.current = {};
       mouthOpenWindowByFaceRef.current = {};
@@ -940,36 +957,46 @@ const MonitoringPage: React.FC = () => {
             const dy = center.y - previousCenter.y;
             const displacement = Math.sqrt(dx * dx + dy * dy);
 
+            // Dynamic threshold: relative to face width (minimises jitter from small detection noise)
+            const faceWidth = box.width;
+            const moveThreshold = Math.max(movementMinAbsoluteThreshold, faceWidth * movementThresholdRatio);
+
+            // Smoothed displacement over a short window to dampen single-frame jitter
             const movementWindow = movementWindowByFaceRef.current[faceKey] || [];
             movementWindow.push(displacement);
-            if (movementWindow.length > 12) movementWindow.shift();
+            if (movementWindow.length > 6) movementWindow.shift();
             movementWindowByFaceRef.current[faceKey] = movementWindow;
 
-            const averageMovement = movementWindow.reduce((sum, value) => sum + value, 0) / Math.max(movementWindow.length, 1);
-            highestMovementScore = Math.max(highestMovementScore, averageMovement);
+            const smoothedDisplacement = movementWindow.reduce((sum, val) => sum + val, 0) / movementWindow.length;
+            highestMovementScore = Math.max(highestMovementScore, smoothedDisplacement);
 
-            const movementEvents = largeMovementEventsByFaceRef.current[faceKey] || [];
-            if (displacement >= movementThreshold) {
-              movementEvents.push(now);
+            // Consecutive-frame requirement: micro jitter rarely persists across consecutive frames
+            const consecutiveCount = movementConsecutiveByFaceRef.current[faceKey] || 0;
+            if (smoothedDisplacement >= moveThreshold) {
+              const nextCount = consecutiveCount + 1;
+              movementConsecutiveByFaceRef.current[faceKey] = nextCount;
+              if (nextCount >= movementConsecutiveRequired) {
+                addAlert(
+                  'excessive_movement',
+                  `Sustained movement detected for ${entry.matchedStudentId || faceKey}: ${nextCount} consecutive frames above ${moveThreshold.toFixed(0)}px (${(movementThresholdRatio * 100).toFixed(0)}% of face width).`,
+                  'medium',
+                  Number((nextCount / movementConsecutiveRequired).toFixed(2)),
+                  1,
+                  true,
+                  alertStudentId,
+                  faceKey
+                );
+                movementConsecutiveByFaceRef.current[faceKey] = 0;
+              }
+            } else {
+              // Micro-movement or stationary — reset consecutive counter
+              movementConsecutiveByFaceRef.current[faceKey] = 0;
             }
-            largeMovementEventsByFaceRef.current[faceKey] = movementEvents.filter((timestamp) => now - timestamp <= movementEventWindowMs);
 
-            if (largeMovementEventsByFaceRef.current[faceKey].length >= movementBurstsRequired) {
-              addAlert(
-                'excessive_movement',
-                `Repeated strong movement detected for ${entry.matchedStudentId || faceKey}: ${largeMovementEventsByFaceRef.current[faceKey].length} bursts above ${movementThreshold}px within ${(movementEventWindowMs / 1000).toFixed(0)}s.`,
-                'medium',
-                Number((largeMovementEventsByFaceRef.current[faceKey].length / movementBurstsRequired).toFixed(2)),
-                1,
-                true,
-                alertStudentId,
-                faceKey
-              );
-              largeMovementEventsByFaceRef.current[faceKey] = [];
-            }
-
+            // Head rotation: relative threshold based on face width (head turns shift face centre significantly)
+            const headTurnThreshold = Math.max(headTurnMinAbsoluteThreshold, faceWidth * headRotationThresholdRatio);
             const absDx = Math.abs(dx);
-            if (absDx >= headRotationThreshold) {
+            if (absDx >= headTurnThreshold) {
               const currentDirection: -1 | 1 = dx < 0 ? -1 : 1;
               const previousDirection = lastHorizontalDirectionByFaceRef.current[faceKey] || 0;
               if (previousDirection !== 0 && currentDirection !== previousDirection) {
@@ -1116,12 +1143,13 @@ const MonitoringPage: React.FC = () => {
                 const poseScore = poseMovementWindowRef.current.reduce((sum, value) => sum + value, 0);
                 const normalizedScore = Number((poseScore * 2.5).toFixed(1));
                 setMovementScore(normalizedScore);
-                if (normalizedScore > movementThreshold) {
+                const poseMovementThreshold = 25;
+                if (normalizedScore > poseMovementThreshold) {
                   addAlert(
                     'excessive_movement',
-                        `Flagged for sudden movement: head pose movement score ${normalizedScore} exceeded threshold ${movementThreshold}.`,
+                        `Flagged for sudden movement: head pose movement score ${normalizedScore} exceeded threshold ${poseMovementThreshold}.`,
                     'medium',
-                    Number((normalizedScore / movementThreshold).toFixed(2)),
+                    Number((normalizedScore / poseMovementThreshold).toFixed(2)),
                     1,
                     true,
                     aws.matchedStudentId || undefined,
@@ -1220,11 +1248,26 @@ const MonitoringPage: React.FC = () => {
   };
 
   const downloadAlertLog = () => {
-    const blob = new Blob([JSON.stringify(alerts, null, 2)], { type: 'application/json' });
+    const header = 'Timestamp,Camera,Hall,Student ID,Event Type,Severity,Suspicion Score,Threshold,Detail';
+    const rows = alerts.map((a) =>
+      [
+        a.timestamp,
+        a.cameraId,
+        a.hallId,
+        a.studentId,
+        a.eventType,
+        a.severity,
+        a.suspicionScore,
+        a.threshold,
+        `"${(a.detail || '').replace(/"/g, '""')}"`,
+      ].join(',')
+    );
+    const csv = [header, ...rows].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `malpractice_log_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`;
+    link.download = `malpractice_log_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.csv`;
     link.click();
     URL.revokeObjectURL(url);
   };
@@ -1248,7 +1291,7 @@ const MonitoringPage: React.FC = () => {
       <div style={{ maxWidth: '1000px', margin: '0 auto' }}>
         <h2 className="animate-fade-in-up" style={{ color: 'var(--accent)', marginBottom: '1.5rem' }}>Live Exam Monitoring</h2>
         
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', marginBottom: '2rem' }}>
+        <div className="stagger-children" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', marginBottom: '2rem' }}>
           <div className="card-accent-hover" style={{ background: 'var(--card)', padding: '1.5rem', borderRadius: '16px', border: '1px solid var(--border)' }}>
             <h3 style={{ margin: 0, color: 'var(--muted)' }}>Active Sessions</h3>
             <p style={{ fontSize: '2.5rem', fontWeight: 'bold', color: '#5EEAD4', margin: '0.5rem 0' }}>{data.activeSessions}</p>
@@ -1259,11 +1302,11 @@ const MonitoringPage: React.FC = () => {
           </div>
         </div>
 
-        <div className="card-accent-hover" style={{ background: 'var(--card)', padding: '1.5rem', borderRadius: '16px', border: '1px solid var(--border)' }}>
+        <div className="card-accent-hover animate-fade-in-up delay-5" style={{ background: 'var(--card)', padding: '1.5rem', borderRadius: '16px', border: '1px solid var(--border)' }}>
           <h3 style={{ marginTop: 0, marginBottom: '1rem', borderBottom: '1px solid var(--border)', paddingBottom: '0.5rem', color: 'var(--accent)' }}>Recent Activity Logs</h3>
           <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
             {data.recentLogs.map((log: any, index: number) => (
-              <li key={index} style={{ padding: '0.75rem 0', borderBottom: index !== data.recentLogs.length - 1 ? '1px solid var(--border)' : 'none', display: 'flex', justifyContent: 'space-between' }}>
+              <li key={index} className="list-item-enter" style={{ animationDelay: `${0.06 + index * 0.04}s`, padding: '0.75rem 0', borderBottom: index !== data.recentLogs.length - 1 ? '1px solid var(--border)' : 'none', display: 'flex', justifyContent: 'space-between' }}>
                 <span>{log.event}</span>
                 <span style={{ color: '#888', fontSize: '0.9rem' }}>{log.time}</span>
               </li>
@@ -1272,15 +1315,15 @@ const MonitoringPage: React.FC = () => {
         </div>
 
         <div style={{ marginTop: '2rem', background: 'rgba(15, 23, 42, 0.92)', color: '#fff', padding: '1.5rem', borderRadius: '16px', boxShadow: '0 10px 24px rgba(15,23,42,0.18)' }}>
-          <div style={{ fontSize: '0.85rem', letterSpacing: '0.08em', textTransform: 'uppercase', color: '#93C5FD', fontWeight: 700, marginBottom: '0.5rem' }}>
+          <div className="animate-fade-in-up delay-1" style={{ fontSize: '0.85rem', letterSpacing: '0.08em', textTransform: 'uppercase', color: '#93C5FD', fontWeight: 700, marginBottom: '0.5rem' }}>
             AI Malpractice Detection
           </div>
-          <h3 style={{ marginTop: 0, marginBottom: '1rem' }}>Real-time face monitoring and malpractice alerts</h3>
+          <h3 className="animate-fade-in-up delay-2" style={{ marginTop: 0, marginBottom: '1rem' }}>Real-time face monitoring and malpractice alerts</h3>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: '1rem' }}>
             <div>
               {flaggedStudentId && (
-                <div style={{ marginBottom: '0.9rem', background: 'rgba(127,29,29,0.28)', border: '1px solid rgba(248,113,113,0.45)', borderRadius: '10px', padding: '0.8rem 0.9rem', color: '#FCA5A5' }}>
+                <div className="animate-slide-in-left" style={{ marginBottom: '0.9rem', background: 'rgba(127,29,29,0.28)', border: '1px solid rgba(248,113,113,0.45)', borderRadius: '10px', padding: '0.8rem 0.9rem', color: '#FCA5A5' }}>
                   <div style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.08em', color: '#FCA5A5', fontWeight: 700 }}>Flagged Student ID</div>
                   <div style={{ fontSize: '1.15rem', fontWeight: 800 }}>{flaggedStudentId}</div>
                   <div style={{ marginTop: '0.25rem', color: '#FECACA', fontSize: '0.86rem' }}>
@@ -1289,28 +1332,62 @@ const MonitoringPage: React.FC = () => {
                 </div>
               )}
 
-              <div style={{ position: 'relative', borderRadius: '16px', overflow: 'hidden', border: `2px solid ${lastAlert ? severityColor : 'rgba(148,163,184,0.35)'}`, background: '#020617', minHeight: '270px' }}>
-                <video ref={videoRef} autoPlay muted playsInline style={{ width: '100%', display: 'block', minHeight: '270px', objectFit: 'cover' }} />
-                <canvas
-                  ref={canvasRef}
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    width: '100%',
-                    height: '100%',
-                  }}
-                />
-                {!cameraActive && (
-                  <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', background: 'rgba(2, 6, 23, 0.72)' }}>
-                    Camera is offline
+              <div className={cameraActive ? 'animate-border-glow' : ''} style={{ position: 'relative', borderRadius: '16px', overflow: 'hidden', border: `2px solid ${lastAlert ? severityColor : 'rgba(148,163,184,0.35)'}`, background: '#020617', minHeight: '400px' }}>
+                {hallViewMode === 'grid' ? (
+                  /* Multi-camera grid for exam hall */
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr 1fr', gap: '2px', minHeight: '400px', background: '#1E293B' }}>
+                    {/* Camera 1 - Primary (front view with face detection) */}
+                    <div style={{ position: 'relative', overflow: 'hidden', gridColumn: '1', gridRow: '1 / 3', background: '#020617' }}>
+                      <div style={{ position: 'absolute', top: 4, left: 4, zIndex: 10, background: 'rgba(14,165,233,0.85)', color: '#fff', padding: '2px 8px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.05em' }}>FRONT VIEW - AI Detection Active</div>
+                      <video ref={videoRef} autoPlay muted playsInline style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain', minHeight: '400px' }} />
+                      <canvas ref={canvasRef} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }} />
+                      {!cameraActive && (
+                        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', background: 'rgba(2, 6, 23, 0.72)' }}>
+                          Camera offline
+                        </div>
+                      )}
+                    </div>
+                    {/* Camera 2 - Side view (left) */}
+                    <div style={{ position: 'relative', overflow: 'hidden', background: '#0F172A', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <div style={{ position: 'absolute', top: 4, left: 4, zIndex: 10, background: 'rgba(100,116,139,0.8)', color: '#fff', padding: '2px 8px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.05em' }}>LEFT WING</div>
+                      <canvas ref={canvasRef2} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }} />
+                      <div style={{ textAlign: 'center', color: '#64748B' }}>
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#475569" strokeWidth="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><circle cx="12" cy="17" r="1"/></svg>
+                        <div style={{ fontSize: '0.75rem', marginTop: '0.25rem' }}>External camera port</div>
+                        <div style={{ fontSize: '0.65rem', color: '#475569' }}>Connect USB camera 2</div>
+                      </div>
+                    </div>
+                    {/* Camera 3 - Right view */}
+                    <div style={{ position: 'relative', overflow: 'hidden', background: '#0F172A', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <div style={{ position: 'absolute', top: 4, left: 4, zIndex: 10, background: 'rgba(100,116,139,0.8)', color: '#fff', padding: '2px 8px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.05em' }}>RIGHT WING</div>
+                      <canvas ref={canvasRef3} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }} />
+                      <div style={{ textAlign: 'center', color: '#64748B' }}>
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#475569" strokeWidth="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><circle cx="12" cy="17" r="1"/></svg>
+                        <div style={{ fontSize: '0.75rem', marginTop: '0.25rem' }}>External camera port</div>
+                        <div style={{ fontSize: '0.65rem', color: '#475569' }}>Connect USB camera 3</div>
+                      </div>
+                    </div>
                   </div>
+                ) : (
+                  /* Single camera view (original) */
+                  <>
+                    <video ref={videoRef} autoPlay muted playsInline style={{ width: '100%', display: 'block', minHeight: '400px', objectFit: 'contain' }} />
+                    <canvas ref={canvasRef} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }} />
+                    {!cameraActive && (
+                      <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', background: 'rgba(2, 6, 23, 0.72)' }}>
+                        Camera is offline
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
 
               <div style={{ display: 'flex', gap: '0.7rem', marginTop: '0.85rem', flexWrap: 'wrap' }}>
                 <button onClick={cameraActive ? stopCamera : startCamera} style={{ background: cameraActive ? '#1E3A8A' : '#1D4ED8', border: 'none', color: '#fff', borderRadius: '12px', padding: '0.55rem 0.95rem', fontWeight: 700, cursor: 'pointer' }}>
                   {cameraActive ? 'Stop Camera' : 'Start Camera'}
+                </button>
+                <button onClick={() => setHallViewMode(hallViewMode === 'grid' ? 'single' : 'grid')} style={{ background: '#1D4ED8', border: '1px solid #1E3A8A', color: 'var(--text)', borderRadius: '12px', padding: '0.55rem 0.95rem', fontWeight: 700, cursor: 'pointer' }}>
+                  View: {hallViewMode === 'grid' ? 'Multi-Cam' : 'Single'}
                 </button>
                 <button onClick={() => setAlertToneEnabled((v) => !v)} style={{ background: '#1D4ED8', border: '1px solid #1E3A8A', color: 'var(--text)', borderRadius: '12px', padding: '0.55rem 0.95rem', fontWeight: 700, cursor: 'pointer' }}>
                   Alert Tone: {alertToneEnabled ? 'On' : 'Off'}
@@ -1335,7 +1412,7 @@ const MonitoringPage: React.FC = () => {
                   {initializingCollection ? 'Initializing Collection...' : 'Init Rekognition Collection'}
                 </button>
                 <button onClick={downloadAlertLog} disabled={alerts.length === 0} style={{ background: '#1D4ED8', border: 'none', color: '#fff', borderRadius: '12px', padding: '0.55rem 0.95rem', fontWeight: 700, cursor: alerts.length > 0 ? 'pointer' : 'not-allowed', opacity: alerts.length > 0 ? 1 : 0.6 }}>
-                  Export JSON Log
+                  Export CSV Log
                 </button>
               </div>
 
@@ -1359,7 +1436,7 @@ const MonitoringPage: React.FC = () => {
               </div>
             </div>
 
-            <div style={{ display: 'grid', gap: '0.75rem' }}>
+            <div className="stagger-children" style={{ display: 'grid', gap: '0.75rem' }}>
               <div style={{ background: 'var(--border)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '10px', padding: '0.8rem' }}>
                 <div style={{ color: '#93C5FD', fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Absence Duration</div>
                 <div style={{ fontSize: '1.8rem', fontWeight: 800 }}>{absenceSeconds}s</div>
@@ -1368,7 +1445,7 @@ const MonitoringPage: React.FC = () => {
               <div style={{ background: 'var(--border)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '10px', padding: '0.8rem' }}>
                 <div style={{ color: '#93C5FD', fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Movement Score</div>
                 <div style={{ fontSize: '1.8rem', fontWeight: 800 }}>{movementScore}</div>
-                <div style={{ color: 'var(--muted)', fontSize: '0.82rem' }}>Burst threshold: {movementThreshold}px ({movementBurstsRequired} bursts in {(movementEventWindowMs / 1000).toFixed(0)}s)</div>
+                <div style={{ color: 'var(--muted)', fontSize: '0.82rem' }}>Threshold: &gt;{(movementThresholdRatio * 100).toFixed(0)}% face width | {movementConsecutiveRequired} consecutive frames</div>
               </div>
               <div style={{ background: 'var(--border)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '10px', padding: '0.8rem' }}>
                 <div style={{ color: '#93C5FD', fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Alerts Raised</div>
@@ -1376,7 +1453,7 @@ const MonitoringPage: React.FC = () => {
               </div>
               <div style={{ background: 'var(--border)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '10px', padding: '0.8rem' }}>
                 <div style={{ color: '#93C5FD', fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Risk Tier</div>
-                <div style={{ fontSize: '1.2rem', fontWeight: 800, textTransform: 'capitalize' }}>{riskTier}</div>
+                <div className={riskTier !== 'low' ? 'animate-pulse' : ''} style={{ fontSize: '1.2rem', fontWeight: 800, textTransform: 'capitalize', color: riskTier === 'high' ? '#EF4444' : riskTier === 'medium' ? '#F59E0B' : '#10B981' }}>{riskTier}</div>
                 <div style={{ color: 'var(--muted)', fontSize: '0.82rem' }}>Risk score: {riskScore}/100</div>
               </div>
               <div style={{ background: 'var(--border)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '10px', padding: '0.8rem' }}>
@@ -1398,11 +1475,11 @@ const MonitoringPage: React.FC = () => {
             </div>
           </div>
 
-          <div style={{ marginTop: '1rem', background: 'rgba(2, 6, 23, 0.65)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '10px', padding: '0.9rem', color: '#E2E8F0' }}>
+          <div className="animate-fade-in-up delay-3" style={{ marginTop: '1rem', background: 'rgba(2, 6, 23, 0.65)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '10px', padding: '0.9rem', color: '#E2E8F0' }}>
             <h4 style={{ marginTop: 0, marginBottom: '0.8rem', color: 'var(--accent)' }}>Malpractice Event Log</h4>
             {alerts.length === 0 && <div style={{ color: '#94A3B8' }}>No malpractice alerts yet. Start camera to begin monitoring.</div>}
-            {alerts.slice(0, 6).map((alert) => (
-              <div key={alert.id} style={{ padding: '0.55rem 0', borderBottom: '1px solid rgba(148,163,184,0.18)' }}>
+            {alerts.slice(0, 6).map((alert, i) => (
+              <div key={alert.id} className="animate-slide-in-right" style={{ animationDelay: `${0.05 + i * 0.08}s`, padding: '0.55rem 0', borderBottom: '1px solid rgba(148,163,184,0.18)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
                   <div style={{ fontWeight: 700, color: '#E2E8F0' }}>{alert.eventType.replace(/_/g, ' ')}</div>
                   <div style={{ color: '#94A3B8', fontSize: '0.85rem' }}>{new Date(alert.timestamp).toLocaleString()}</div>
@@ -1421,13 +1498,13 @@ const MonitoringPage: React.FC = () => {
           </div>
 
           {snapshotDataUrl && (
-            <div style={{ marginTop: '1rem' }}>
+            <div className="animate-fade-in-up" style={{ marginTop: '1rem' }}>
               <div style={{ marginBottom: '0.4rem', color: 'var(--muted)', fontSize: '0.88rem' }}>Latest evidence snapshot</div>
               <img src={snapshotDataUrl} alt="Latest malpractice evidence" style={{ width: '240px', borderRadius: '10px', border: '1px solid var(--border)' }} />
             </div>
           )}
 
-          <div style={{ marginTop: '1.2rem', background: 'rgba(2, 6, 23, 0.65)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '10px', padding: '0.9rem', color: '#E2E8F0' }}>
+          <div className="animate-fade-in-up delay-6" style={{ marginTop: '1.2rem', background: 'rgba(2, 6, 23, 0.65)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '10px', padding: '0.9rem', color: '#E2E8F0' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
               <h4 style={{ margin: 0, color: 'var(--accent)' }}>Enrolled Faces</h4>
               <button onClick={refreshEnrolledFaces} className="btn-lift" style={{ background: 'rgba(148,163,184,0.18)', border: '1px solid rgba(148,163,184,0.3)', color: '#E2E8F0', borderRadius: '12px', padding: '0.45rem 0.8rem', fontWeight: 700, cursor: 'pointer' }}>

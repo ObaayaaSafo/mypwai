@@ -198,6 +198,60 @@ const requestAttendance = async (path: string, init?: RequestInit) => {
   throw lastError || new Error('Unable to reach backend attendance API');
 };
 
+export const fetchMalpracticeEvents = async (courseCode?: string, date?: string) => {
+  try {
+    const params = new URLSearchParams();
+    if (courseCode) params.set('courseCode', courseCode);
+    if (date) params.set('date', date);
+    const response = await requestAttendance(`/malpractice?${params.toString()}`);
+    return await response.json();
+  } catch {
+    // Fallback: scan local IndexedDB for malpractice entries
+    const db = await initDB();
+    const allEvents = await db.getAll('scanEvents');
+    return allEvents
+      .filter((e: any) => {
+        const reason = String(e.reason || '');
+        if (!reason.startsWith('malpractice:')) return false;
+        if (courseCode && e.courseCode !== courseCode) return false;
+        if (date && e.date !== date) return false;
+        return true;
+      })
+      .map((e: any) => {
+        const reason = String(e.reason || '');
+        const parts: Record<string, string> = {};
+        reason.split('|').forEach((segment: string) => {
+          const [key, ...rest] = segment.split(':');
+          if (key && rest.length > 0) parts[key.trim()] = rest.join(':').trim();
+        });
+        return {
+          id: e.id,
+          studentId: e.studentId,
+          studentName: 'Unknown',
+          courseCode: e.courseCode,
+          date: e.date,
+          time: e.time,
+          eventType: parts.malpractice || 'unknown',
+          severity: parts.severity || 'low',
+          score: parseFloat(parts.score || '0'),
+          detail: parts[''] || '',
+        };
+      });
+  }
+};
+
+export const fetchMalpracticeSummary = async (courseCode?: string, date?: string) => {
+  try {
+    const params = new URLSearchParams();
+    if (courseCode) params.set('courseCode', courseCode);
+    if (date) params.set('date', date);
+    const response = await requestAttendance(`/malpractice-summary?${params.toString()}`);
+    return await response.json();
+  } catch {
+    return { totalEvents: 0, byType: {}, bySeverity: {}, topTypes: [] };
+  }
+};
+
 type AISnapshot = {
   students: any[];
   attendance: any[];
@@ -333,10 +387,12 @@ export const fetchDashboardStats = async () => {
     const attendance = await attendanceRes.json();
     const studentCount = Array.isArray(students) ? students.length : 0;
     const sessionCount = Array.isArray(sessions) ? sessions.length : 0;
+    // Backend returns raw MySQL field names: attendance_date, student_id
+    const today = todayIso();
     const presentToday = new Set(
       (Array.isArray(attendance) ? attendance : [])
-        .filter((a: any) => a.date === todayIso() && a.status === 'Present')
-        .map((a: any) => a.studentId)
+        .filter((a: any) => (a.attendance_date || a.date) === today && a.status === 'Present')
+        .map((a: any) => a.student_id || a.studentId)
     ).size;
     const attendanceRate = studentCount > 0 ? Math.round((presentToday / studentCount) * 100) : 0;
     return { sessions: sessionCount, students: studentCount, attendance: attendanceRate };
@@ -345,10 +401,11 @@ export const fetchDashboardStats = async () => {
     const students = await db.count('students');
     const sessions = await db.count('sessions');
     const attendance = await db.getAll('attendance');
+    const today = todayIso();
     const presentToday = new Set(
       attendance
-        .filter(a => a.date === todayIso() && a.status === 'Present')
-        .map(a => a.studentId)
+        .filter((a: any) => (a.date || a.attendance_date) === today && a.status === 'Present')
+        .map((a: any) => a.studentId || a.student_id)
     ).size;
     const attendanceRate = students > 0 ? Math.round((presentToday / students) * 100) : 0;
     return { sessions, students, attendance: attendanceRate };
@@ -409,9 +466,29 @@ export const verifyAttendance = async (studentId?: string, fingerprintData?: str
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ templateBase64: fingerprintData }),
       });
-      return response.json();
+      const result = await response.json();
+
+      // The fingerprint verify endpoint now records attendance automatically.
+      // Return a properly formatted message based on the result.
+      if (!result.matched) {
+        throw new Error(result.message || 'Fingerprint not recognized');
+      }
+
+      const student = result.student;
+      if (result.attendance === 'duplicate') {
+        return { message: `Duplicate scan detected for ${student.name} (${student.index})`, courseCode: result.courseCode, duplicate: true };
+      }
+      if (result.attendance === 'error') {
+        return { message: `Verified: ${student.name}, but attendance recording failed: ${result.error}`, courseCode: result.courseCode };
+      }
+
+      // Attendance successfully recorded
+      return { message: `Verified: ${student.name} (${student.index}) — Attendance marked for ${result.courseCode} at ${result.time}`, courseCode: result.courseCode, recorded: true };
     } catch (error) {
-      // Fall through to offline fallback
+      if (error instanceof Error && /not recognized/i.test(error.message)) {
+        throw error; // Don't fall through — this is a real biometric mismatch
+      }
+      // Fall through to offline fallback for network errors
     }
   }
 
@@ -526,7 +603,19 @@ export const enrollFingerprint = async (studentId: string, fingerprintData?: str
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ studentId, templateBase64: fingerprintData }),
       });
-      return res.json();
+      const result = await res.json();
+
+      // Also update IndexedDB so offline fallback shows correct status
+      try {
+        const db = await initDB();
+        const existing = await db.get('students', studentId);
+        if (existing) {
+          await db.put('students', { ...existing, fingerprintEnrolled: true });
+          await persistDBBackup();
+        }
+      } catch { /* non-critical */ }
+
+      return result;
     }
 
     // Fallback: mark enrolled locally via attendance API
@@ -564,34 +653,53 @@ export const enrollFingerprint = async (studentId: string, fingerprintData?: str
 };
 
 export const fetchReports = async (course: string, date: string) => {
-  let allAttendance: any[] = [];
-  let students: any[] = [];
-
   try {
-    const [attendanceRes, studentsRes] = await Promise.all([
-      requestAttendance('/attendance'),
-      requestAttendance('/students'),
-    ]);
-    allAttendance = await attendanceRes.json();
-    students = await studentsRes.json();
+    // Use the proper backend report endpoint with JOINed student data
+    const params = new URLSearchParams();
+    if (course) params.set('courseCode', course);
+    if (date) params.set('date', date);
+    const response = await requestAttendance(`/reports?${params.toString()}`);
+    const records = await response.json();
+    return Array.isArray(records) ? records : [];
   } catch {
+    // Offline fallback: load from IndexedDB and filter locally
     const db = await initDB();
-    allAttendance = await db.getAll('attendance');
-    students = await db.getAll('students');
+    const [allAttendance, allStudents] = await Promise.all([
+      db.getAll('attendance'),
+      db.getAll('students'),
+    ]);
+
+    // Filter locally with proper AND logic
+    const records = allAttendance.filter((a: any) => {
+      const dateMatch = !date || a.date === date;
+      const courseMatch = !course || a.courseCode === course;
+      return dateMatch && courseMatch;
+    });
+
+    // Build records with student names from IndexedDB
+    const result = records.map((r: any) => {
+      const student = allStudents.find((s: any) => s.index === r.studentId);
+      return {
+        studentId: r.studentId,
+        name: student ? student.name : 'Unknown',
+        status: r.status,
+        time: r.time,
+      };
+    });
+
+    // Also add absent students (those who never showed up)
+    const presentIds = new Set(result.map((r: any) => r.studentId));
+    const absentRecords = allStudents
+      .filter((s: any) => !presentIds.has(s.index))
+      .map((s: any) => ({
+        studentId: s.index,
+        name: s.name,
+        status: 'Absent',
+        time: '-',
+      }));
+
+    return [...result, ...absentRecords].sort((a: any, b: any) => a.studentId.localeCompare(b.studentId));
   }
-  
-  // Filter locally (in a real app, use indexes)
-  const records = allAttendance.filter(a => a.courseCode.includes(course) || a.date === date);
-  
-  return records.map(r => {
-    const student = students.find(s => s.index === r.studentId);
-    return {
-      studentId: r.studentId,
-      name: student ? student.name : 'Unknown',
-      status: r.status,
-      time: r.time
-    };
-  });
 };
 
 export const fetchSessions = async () => {
