@@ -25,6 +25,7 @@ const explicitBase =
 const candidateBases = explicitBase
   ? [explicitBase]
   : [
+      'https://wifi-viscosity-overhear.ngrok-free.dev/api/ai',
       '/api/ai',
       'http://127.0.0.1:4007/api/ai',
       'http://127.0.0.1:4000/api/ai',
@@ -33,6 +34,7 @@ const candidateBases = explicitBase
     ];
 
 const adminCandidateBases = [
+  'https://wifi-viscosity-overhear.ngrok-free.dev/api/admin',
   '/api/admin',
   'http://127.0.0.1:4007/api/admin',
   'http://127.0.0.1:4000/api/admin',
@@ -41,6 +43,7 @@ const adminCandidateBases = [
 ];
 
 const authCandidateBases = [
+  'https://wifi-viscosity-overhear.ngrok-free.dev/api/auth',
   '/api/auth',
   'http://127.0.0.1:4007/api/auth',
   'http://127.0.0.1:4000/api/auth',
@@ -49,6 +52,7 @@ const authCandidateBases = [
 ];
 
 const attendanceCandidateBases = [
+  'https://wifi-viscosity-overhear.ngrok-free.dev/api/attendance',
   '/api/attendance',
   'http://127.0.0.1:4007/api/attendance',
   'http://127.0.0.1:4000/api/attendance',

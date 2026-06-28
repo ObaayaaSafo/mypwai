@@ -3,6 +3,7 @@ import { initDB, persistDBBackup } from './db';
 const hasPhoto = (photo?: string | null) => typeof photo === 'string' && photo.trim().length > 0;
 
 const apiBases = [
+  'https://wifi-viscosity-overhear.ngrok-free.dev/api',
   '/api',
   `${window.location.protocol}//${window.location.hostname}:4007/api`,
   'http://127.0.0.1:4007/api',
