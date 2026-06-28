@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { fetchStudents, addStudent, deleteStudent } from '../api'; // addStudent also handles updates
-import { enrollFaceToRekognitionCollection, getRekognitionCollectionStatus, initializeRekognitionCollection, checkDuplicateFaceEnrollment, fetchCourseEnrollments, fetchEnrolledCourses, assignStudentsToCourse, removeStudentsFromCourse } from '../apiExtra';
+import { enrollFaceToRekognitionCollection, getRekognitionCollectionStatus, initializeRekognitionCollection, checkDuplicateFaceEnrollment, fetchCourseEnrollments, fetchEnrolledCourses, assignStudentsToCourse, removeStudentsFromCourse, deleteRekognitionFaceByStudentId } from '../apiExtra';
 
 const StudentManagementPage: React.FC = () => {
   const [students, setStudents] = useState<any[]>([]);
@@ -189,8 +189,14 @@ const StudentManagementPage: React.FC = () => {
 
   const handleDelete = async (index: string) => {
     setNotice('');
-    if (window.confirm(`Are you sure you want to delete student ${index}?`)) {
+    if (window.confirm(`Are you sure you want to delete student ${index}? This will also remove their face from recognition.`)) {
       try {
+        // Delete face from AWS Rekognition first (non-fatal if it fails)
+        try {
+          await deleteRekognitionFaceByStudentId(index);
+        } catch (faceErr) {
+          console.warn('Failed to delete Rekognition face for student', index, faceErr);
+        }
         await deleteStudent(index);
         await loadStudents();
       } catch {
@@ -201,10 +207,16 @@ const StudentManagementPage: React.FC = () => {
 
   const handleBulkDelete = async () => {
     setNotice('');
-    if (window.confirm(`Are you sure you want to delete ${selectedIndices.size} students?`)) {
+    if (window.confirm(`Are you sure you want to delete ${selectedIndices.size} students? This will also remove their faces from recognition.`)) {
       setLoading(true);
       try {
         for (const index of Array.from(selectedIndices)) {
+          // Delete face from AWS Rekognition first (non-fatal)
+          try {
+            await deleteRekognitionFaceByStudentId(index);
+          } catch (faceErr) {
+            console.warn('Failed to delete Rekognition face for student', index, faceErr);
+          }
           await deleteStudent(index);
         }
         await loadStudents();

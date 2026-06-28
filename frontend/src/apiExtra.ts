@@ -840,6 +840,13 @@ export const deleteRekognitionFace = async (faceId: string) => {
   return response.json();
 };
 
+export const deleteRekognitionFaceByStudentId = async (studentId: string) => {
+  const response = await requestAI(`/malpractice/collection/faces/by-student/${encodeURIComponent(studentId)}`, {
+    method: 'DELETE',
+  });
+  return response.json();
+};
+
 export const fetchStudentIdOptions = async () => {
   const db = await initDB();
   const students = await db.getAll('students');
