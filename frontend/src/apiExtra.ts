@@ -571,6 +571,7 @@ export const verifyAttendance = async (studentId?: string, fingerprintData?: str
 };
 
 const fingerprintCandidateBases = [
+  'https://wifi-viscosity-overhear.ngrok-free.dev/api/fingerprint',
   '/api/fingerprint',
   'http://127.0.0.1:4007/api/fingerprint',
   'http://127.0.0.1:4000/api/fingerprint',
@@ -587,6 +588,7 @@ const requestFingerprint = async (path: string, init?: RequestInit) => {
     try {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
+        'ngrok-skip-browser-warning': 'true',
         ...(init?.headers as Record<string, string> || {}),
       };
       if (token && !headers.Authorization && !headers.authorization) {
