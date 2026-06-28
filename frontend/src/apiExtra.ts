@@ -69,6 +69,7 @@ const requestAI = async (path: string, init?: RequestInit) => {
     try {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
+        'ngrok-skip-browser-warning': 'true',
         ...(init?.headers as Record<string, string> || {}),
       };
       if (token && !headers.Authorization && !headers.authorization) {
@@ -114,6 +115,7 @@ const requestAuth = async (path: string, init?: RequestInit) => {
     try {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
+        'ngrok-skip-browser-warning': 'true',
         ...(init?.headers as Record<string, string> || {}),
       };
       if (token && !headers.Authorization && !headers.authorization) {
@@ -153,7 +155,7 @@ const requestAuth = async (path: string, init?: RequestInit) => {
 const requestAdmin = async (path: string, init?: RequestInit) => {
   let lastError: Error | null = null;
   const token = localStorage.getItem('authToken');
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
   for (const base of adminCandidateBases) {
@@ -182,7 +184,11 @@ const requestAttendance = async (path: string, init?: RequestInit) => {
   for (const base of attendanceCandidateBases) {
     const url = `${trimTrailingSlash(base)}${path}`;
     try {
-      const response = await fetch(url, init);
+      const headers: Record<string, string> = {
+        'ngrok-skip-browser-warning': 'true',
+        ...(init?.headers as Record<string, string> || {}),
+      };
+      const response = await fetch(url, { ...init, headers });
       if (!response.ok) {
         let detail = `Attendance request failed with status ${response.status}`;
         try {

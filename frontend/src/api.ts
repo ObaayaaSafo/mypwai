@@ -23,8 +23,14 @@ const tryFetch = async (bases: string[], path: string, init?: RequestInit) => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
 
+      const headers: Record<string, string> = {
+        ...((init?.headers as Record<string, string>) || {}),
+        'ngrok-skip-browser-warning': 'true',
+      };
+
       const response = await fetch(`${base}${path}`, {
         ...init,
+        headers,
         signal: controller.signal,
       });
 
