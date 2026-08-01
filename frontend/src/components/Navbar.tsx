@@ -36,8 +36,8 @@ const Navbar: React.FC = () => {
 
       <div className={`navbar-nav ${open ? 'mobile-open' : ''}`} onClick={close}>
         <Link to="/dashboard" className={getLinkClass('/dashboard')}>Dashboard</Link>
-        <Link to="/students" className={getLinkClass('/students')}>Students</Link>
-        <Link to="/enroll" className={getLinkClass('/enroll')}>Enrollment</Link>
+        {userRole === 'admin' && <Link to="/students" className={getLinkClass('/students')}>Students</Link>}
+        {userRole === 'admin' && <Link to="/enroll" className={getLinkClass('/enroll')}>Enrollment</Link>}
         <Link to="/exam-setup" className={getLinkClass('/exam-setup')}>Exams</Link>
         <Link to="/attendance" className={getLinkClass('/attendance')}>Attendance</Link>
         <Link to="/monitoring" className={getLinkClass('/monitoring')}>Monitoring</Link>

@@ -803,4 +803,48 @@ router.delete('/malpractice/collection/faces/:faceId', async (req, res) => {
   }
 });
 
+// DELETE /api/ai/malpractice/collection/faces/by-student/:studentId
+// Deletes all face records from the Rekognition collection that match the given student ID (ExternalImageId)
+router.delete('/malpractice/collection/faces/by-student/:studentId', async (req, res) => {
+  const awsCollectionId = getAwsCollectionId();
+  const studentId = typeof req.params?.studentId === 'string' ? req.params.studentId.trim() : '';
+
+  if (!awsConfigured()) {
+    return res.status(503).json({ deleted: 0, message: 'AWS not configured' });
+  }
+  if (!awsCollectionId || !studentId) {
+    return res.status(400).json({ deleted: 0, message: 'collectionId and studentId required' });
+  }
+
+  try {
+    // List all faces and find those matching this student
+    const listResponse = await rekognitionClient.send(
+      new ListFacesCommand({ CollectionId: awsCollectionId, MaxResults: 1000 })
+    );
+    const matchingFaceIds = (listResponse.Faces || [])
+      .filter((f: any) => f.ExternalImageId === studentId)
+      .map((f: any) => f.FaceId)
+      .filter(Boolean) as string[];
+
+    if (matchingFaceIds.length === 0) {
+      return res.json({ deleted: 0, studentId, message: 'No faces found for this student' });
+    }
+
+    // Delete in batches of 5 (AWS limit per DeleteFaces call)
+    let deleted = 0;
+    for (let i = 0; i < matchingFaceIds.length; i += 5) {
+      const batch = matchingFaceIds.slice(i, i + 5);
+      await rekognitionClient.send(
+        new DeleteFacesCommand({ CollectionId: awsCollectionId, FaceIds: batch })
+      );
+      deleted += batch.length;
+    }
+
+    return res.json({ deleted, studentId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to delete faces by student';
+    return res.status(502).json({ deleted: 0, message });
+  }
+});
+
 export default router;

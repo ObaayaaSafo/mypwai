@@ -1,124 +1,117 @@
-// Index: ScannerService.init():47 | shutdown():54 | probeConnection():60 | connect():69 | getDeviceInfo():74
-//        capture():87 | verify():98 | enroll():106 | getEnrolledStudents():111 | deleteTemplate():116 | reloadTemplates():122
-export type ScannerDeviceInfo = {
-  deviceId: string;
-  model: string;
-  firmware: string;
-  status: 'ready' | 'busy' | 'offline';
-  lastCalibration: string;
-  connectionType: 'hid' | 'usb' | 'serial';
+/**
+ * scannerService.ts — Frontend service for the ZK9500 fingerprint scanner.
+ *
+ * Calls the real backend /api/fingerprint/* endpoints instead of browser
+ * WebHID mocks.  The backend wraps the ZK SDK via koffi/FFI.
+ *
+ * Index: ScannerServiceImpl:probeConnection():39 | getDeviceInfo():57 | connect():72 | capture():86
+ */
+
+const FINGERPRINT_BASES = [
+  'https://wifi-viscosity-overhear.ngrok-free.dev/api/fingerprint',
+  '/api/fingerprint',
+  `${window.location.protocol}//${window.location.hostname}:4007/api/fingerprint`,
+  'http://127.0.0.1:4007/api/fingerprint',
+  'http://localhost:4007/api/fingerprint',
+  `${window.location.protocol}//${window.location.hostname}:4000/api/fingerprint`,
+  'http://127.0.0.1:4000/api/fingerprint',
+  'http://localhost:4000/api/fingerprint',
+];
+
+const HEADERS = {
+  'Content-Type': 'application/json',
+  'ngrok-skip-browser-warning': 'true',
 };
 
-export type FingerprintCapture = {
+const tryFetch = async (path: string, init?: RequestInit): Promise<Response> => {
+  let lastError: Error | null = null;
+  for (const base of FINGERPRINT_BASES) {
+    try {
+      const res = await fetch(`${base}${path}`, {
+        ...init,
+        headers: { ...HEADERS, ...(init?.headers as Record<string, string> || {}) },
+      });
+      return res;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error('Network request failed');
+    }
+  }
+  throw lastError || new Error('Unable to reach fingerprint backend');
+};
+
+export interface ScannerDeviceInfo {
+  name: string;
+  model: string;
+  status: string;
+  templateCount: number;
+}
+
+export interface FingerprintCapture {
   template: string;
   quality: number;
-  fingerLabel: string;
-  captureTime: string;
-};
+}
 
-// ── Backend API helpers ──
+class ScannerServiceImpl {
+  private deviceOpen = false;
 
-const API_BASE = `${window.location.protocol}//${window.location.hostname}:4007/api/fingerprint`;
-
-const apiCall = async (path: string, options?: RequestInit) => {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Request failed: ${res.status}`);
-  }
-  return res.json();
-};
-
-// ── Service ──
-
-let initialized = false;
-let connected = false;
-
-export const ScannerService = {
-  isBrowserSupported: () => true, // Browser just needs fetch — backend handles the hardware
-
-  /** Initialize backend fingerprint subsystem */
-  init: async (): Promise<void> => {
-    if (initialized) return;
-    const result = await apiCall('/init', { method: 'POST' });
-    initialized = true;
-    connected = result.deviceCount > 0;
-  },
-
-  /** Shutdown backend fingerprint subsystem */
-  shutdown: async (): Promise<void> => {
-    await apiCall('/shutdown', { method: 'POST' });
-    initialized = false;
-    connected = false;
-  },
-
-  probeConnection: async (): Promise<boolean> => {
+  /** Quick check — hits /status to see if the scanner is initialised. */
+  async probeConnection(): Promise<boolean> {
     try {
-      const status = await apiCall('/status');
-      connected = status.ready && status.deviceOpen;
-      return connected;
+      const res = await tryFetch('/status', {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      return data.ready === true;
     } catch {
-      connected = false;
       return false;
     }
-  },
+  }
 
-  connect: async (): Promise<boolean> => {
-    await ScannerService.init();
-    return ScannerService.probeConnection();
-  },
-
-  getDeviceInfo: async (): Promise<ScannerDeviceInfo> => {
-    const status = await apiCall('/status');
+  /** Return device metadata (mostly from /status). */
+  async getDeviceInfo(): Promise<ScannerDeviceInfo> {
+    const res = await tryFetch('/status');
+    const data = await res.json();
     return {
-      deviceId: 'zk-finger-scanner',
-      model: 'ZKTeco Fingerprint Scanner',
-      firmware: 'ZKFinger SDK 5.3',
-      status: status.ready && status.deviceOpen ? 'ready' : 'offline',
-      lastCalibration: 'Hardware-managed',
-      connectionType: 'usb',
+      name: 'ZK9500 Fingerprint Scanner',
+      model: 'ZK9500',
+      status: data.ready ? 'ready' : data.message ?? 'unavailable',
+      templateCount: data.templateCount ?? 0,
     };
-  },
+  }
 
-  /** Capture fingerprint and receive template as base64 */
-  capture: async (): Promise<FingerprintCapture> => {
-    const result = await apiCall('/capture', { method: 'POST' });
+  /** Initialise the SDK, open the device, load templates. */
+  async connect(): Promise<void> {
+    const res = await tryFetch('/init', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error ?? 'Failed to initialise fingerprint scanner');
+    }
+    this.deviceOpen = true;
+  }
+
+  /**
+   * Capture a fingerprint via the real backend (polls up to 15 s).
+   * The user must be told to place their finger *before* calling this.
+   */
+  async capture(): Promise<FingerprintCapture> {
+    if (!this.deviceOpen) {
+      // Auto-connect so callers don't have to remember
+      await this.connect();
+    }
+
+    const res = await tryFetch('/capture', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok || !data.templateBase64) {
+      throw new Error(data.error ?? 'Failed to capture fingerprint');
+    }
+
     return {
-      template: result.templateBase64 || '',
-      quality: 85,
-      fingerLabel: 'Right thumb',
-      captureTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      template: data.templateBase64,
+      quality: 85, // SDK does not expose a per-capture quality score
     };
-  },
+  }
+}
 
-  /** Verify a fingerprint against enrolled templates */
-  verify: async (): Promise<{
-    matched: boolean;
-    student?: { index: string; name: string; programme: string; level: string };
-    score?: number;
-    message?: string;
-  }> => {
-    return apiCall('/verify', { method: 'POST' });
-  },
-
-  /** Enroll a student's fingerprint */
-  enroll: async (studentId: string): Promise<{ success: boolean; message: string }> => {
-    return apiCall('/enroll', { method: 'POST', body: JSON.stringify({ studentId }) });
-  },
-
-  getEnrolledStudents: async (): Promise<Array<{ index_no: string; name: string }>> => {
-    return apiCall('/enrolled');
-  },
-
-  deleteTemplate: async (studentId: string): Promise<void> => {
-    await apiCall(`/template/${encodeURIComponent(studentId)}`, { method: 'DELETE' });
-  },
-
-  reloadTemplates: async (): Promise<number> => {
-    const result = await apiCall('/reload', { method: 'POST' });
-    return result.templateCount;
-  },
-};
+/** Singleton — used by FingerprintEnrollmentPage and AttendancePage. */
+export const ScannerService = new ScannerServiceImpl();

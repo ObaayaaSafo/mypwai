@@ -8,6 +8,15 @@ import {
 
 const progressSteps = ['Sensor armed', 'Fingerprint captured', 'Template matched', 'Attendance logged'];
 
+type AttendanceResult = {
+  studentName?: string;
+  studentIndex?: string;
+  courseCode?: string;
+  time?: string;
+  duplicate?: boolean;
+  recorded?: boolean;
+};
+
 const glassCard: React.CSSProperties = {
   background: 'var(--card)',
   borderRadius: '16px',
@@ -18,12 +27,15 @@ const glassCard: React.CSSProperties = {
 const AttendancePage: React.FC = () => {
   const [studentId, setStudentId] = useState('');
   const [message, setMessage] = useState('');
+  const [messageType, setMessageType] = useState<'info' | 'success' | 'error' | 'warning'>('info');
   const [loading, setLoading] = useState(false);
   const [deviceConnected, setDeviceConnected] = useState(false);
   const [scanProgress, setScanProgress] = useState(0);
   const [deviceInfo, setDeviceInfo] = useState<ScannerDeviceInfo | null>(null);
   const [capture, setCapture] = useState<FingerprintCapture | null>(null);
   const [activeStep, setActiveStep] = useState(0);
+  const activeCourseCode = localStorage.getItem('activeSessionCourseCode');
+  const activeSessionId = localStorage.getItem('activeSessionId');
 
   useEffect(() => {
     probeDeviceConnection();
@@ -118,12 +130,6 @@ const AttendancePage: React.FC = () => {
     setScanProgress(10);
     setActiveStep(0);
 
-    if (!studentId.trim()) {
-      setLoading(false);
-      setMessage('Enter a student ID before starting verification.');
-      return;
-    }
-
     const progressTimer = window.setInterval(() => {
       setScanProgress((current) => {
         if (current >= 92) {
@@ -140,15 +146,57 @@ const AttendancePage: React.FC = () => {
     try {
       const fingerprintData = await ScannerService.capture();
       setCapture(fingerprintData);
+      setActiveStep(1);
 
-      const res = await verifyAttendance(studentId.trim(), fingerprintData.template);
+      const res = await verifyAttendance(undefined, fingerprintData.template);
       setActiveStep(progressSteps.length - 1);
       setScanProgress(100);
-      setMessage(res.message);
-      playSuccessSound();
+
+      if (res.duplicate) {
+        // Show override dialog for duplicates
+        const action = window.confirm(
+          `${res.message}\n\nOK — acknowledge and continue\nCancel — override (force re-mark attendance)`
+        );
+        if (!action) {
+          // User chose to override — force re-record attendance
+          setMessage('Overriding duplicate...');
+          setMessageType('info');
+          setLoading(true);
+          try {
+            const forced = await verifyAttendance(undefined, fingerprintData.template, undefined, true);
+            setMessage(forced.message);
+            setMessageType('success');
+            playSuccessSound();
+          } catch (err: any) {
+            setMessage(err.message || 'Override failed');
+            setMessageType('error');
+            playErrorSound();
+          }
+          setLoading(false);
+        } else {
+          // User chose OK — just acknowledge
+          setMessage(res.message);
+          setMessageType('success');
+        }
+      } else {
+        setMessage(res.message);
+        setMessageType('success');
+        playSuccessSound();
+      }
+      // Auto-reset after 2s so the next scan can start immediately
+      setTimeout(() => {
+        setMessage('');
+        setScanProgress(0);
+        setActiveStep(0);
+        setCapture(null);
+      }, 2000);
     } catch (error) {
       console.error('Attendance verification error:', error);
-      setMessage(error instanceof Error ? error.message : 'Verification failed');
+      const errMsg = error instanceof Error ? error.message : 'Verification failed';
+      setMessage(errMsg);
+      setMessageType('error');
+      setScanProgress(0);
+      setActiveStep(0);
       playErrorSound();
     } finally {
       window.clearInterval(progressTimer);
@@ -173,7 +221,7 @@ const AttendancePage: React.FC = () => {
           </div>
           <h1 className="animate-fade-in-up" style={{ color: 'var(--accent)', margin: '0.45rem 0 0.5rem', fontSize: '2rem', fontWeight: 700 }}>Biometric Attendance Gate</h1>
           <p className="animate-fade-in-up delay-1" style={{ color: 'var(--text)', margin: 0, maxWidth: '720px', lineHeight: 1.6 }}>
-            Connect the fingerprint scanner, enter the student ID, then scan the finger to mark attendance for the current session.
+            Connect the fingerprint scanner, then scan a finger to automatically identify the student and mark attendance. No manual ID entry needed — the system matches the fingerprint against all enrolled templates.
           </p>
         </div>
 
@@ -277,15 +325,9 @@ const AttendancePage: React.FC = () => {
                 Operator Console
               </div>
               <div style={{ marginTop: '0.9rem' }}>
-                <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--muted)', fontWeight: 700 }}>Student ID</label>
-                  <input
-                    type="text"
-                    placeholder="Enter Student ID"
-                    value={studentId}
-                    onChange={(e) => setStudentId(e.target.value)}
-                    disabled={loading}
-                    className="input"
-                  />
+                <p style={{ color: 'var(--muted)', fontSize: '0.9rem', margin: '0 0 1rem' }}>
+                  Simply press the button below and place a finger on the scanner. The system will automatically identify the student and mark attendance.
+                </p>
                   <button
                     onClick={handleVerify}
                     disabled={loading}
@@ -299,7 +341,7 @@ const AttendancePage: React.FC = () => {
                       padding: '1rem',
                     }}
                   >
-                  {loading ? 'Scanning fingerprint...' : 'Scan fingerprint and mark attendance'}
+                  {loading ? 'Scanning fingerprint...' : 'Scan Fingerprint & Mark Attendance'}
                   </button>
               </div>
 
@@ -345,9 +387,36 @@ const AttendancePage: React.FC = () => {
               </div>
             </div>
 
+            {!activeSessionId && (
+              <div style={{
+                background: 'rgba(242,114,41,0.1)',
+                border: '1px solid rgba(242,114,41,0.25)',
+                borderRadius: '12px',
+                padding: '0.75rem 1rem',
+                color: '#F59E0B',
+                fontSize: '0.85rem',
+                fontWeight: 500,
+              }}>
+                ⚠️ No active session selected. Attendance will be recorded under the default course. Go to <strong>Exams</strong> to activate a session first.
+              </div>
+            )}
+            {activeCourseCode && (
+              <div style={{
+                background: 'rgba(94,234,212,0.06)',
+                border: '1px solid rgba(94,234,212,0.15)',
+                borderRadius: '12px',
+                padding: '0.5rem 0.9rem',
+                color: '#5EEAD4',
+                fontSize: '0.8rem',
+                fontWeight: 600,
+                marginTop: '0.75rem',
+              }}>
+                Active course: <strong style={{ color: 'var(--text)' }}>{activeCourseCode}</strong>
+              </div>
+            )}
             <div className="card-accent-hover" style={{ ...glassCard, padding: '1.35rem', marginTop: '1.25rem' }}>
               <div style={{ color: 'var(--muted)', lineHeight: 1.45, fontSize: '0.9rem' }}>
-                Enter the student ID, then click scan. The connected fingerprint scanner will capture the finger and the student will be marked present.
+                Place any enrolled finger on the scanner and the system will automatically identify the student, verify their enrollment, and record attendance for the current active session.
               </div>
             </div>
           </div>
@@ -358,7 +427,8 @@ const AttendancePage: React.FC = () => {
             marginTop: '1.5rem',
             ...glassCard,
             padding: '1rem 1.25rem',
-            borderLeft: message.toLowerCase().includes('failed') || message.toLowerCase().includes('offline') ? '6px solid var(--upsa-danger)' : '6px solid #5EEAD4',
+            borderLeft: messageType === 'error' ? '6px solid var(--upsa-danger)' : messageType === 'warning' ? '6px solid #FCD34D' : '6px solid #5EEAD4',
+            background: messageType === 'error' ? '#7F1D1D20' : messageType === 'warning' ? '#78350F20' : '#134E4A20',
             color: 'var(--text)',
             fontWeight: 700,
           }}>

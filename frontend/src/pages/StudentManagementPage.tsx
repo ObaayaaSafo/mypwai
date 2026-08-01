@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { fetchStudents, addStudent, deleteStudent } from '../api'; // addStudent also handles updates
-import { enrollFaceToRekognitionCollection, getRekognitionCollectionStatus, initializeRekognitionCollection, checkDuplicateFaceEnrollment } from '../apiExtra';
+import { enrollFaceToRekognitionCollection, getRekognitionCollectionStatus, initializeRekognitionCollection, checkDuplicateFaceEnrollment, fetchCourseEnrollments, fetchEnrolledCourses, assignStudentsToCourse, removeStudentsFromCourse, deleteRekognitionFaceByStudentId } from '../apiExtra';
 
 const StudentManagementPage: React.FC = () => {
   const [students, setStudents] = useState<any[]>([]);
@@ -14,6 +14,18 @@ const StudentManagementPage: React.FC = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedIndices, setSelectedIndices] = useState<Set<string>>(new Set());
   const [viewStudent, setViewStudent] = useState<any | null>(null);
+
+  // ── Course Enrollment State ──
+  const [courseEnrollmentTab, setCourseEnrollmentTab] = useState(false);
+  const [enrollmentCourseCode, setEnrollmentCourseCode] = useState('');
+  const [enrolledStudents, setEnrolledStudents] = useState<any[]>([]);
+  const [availableCourses, setAvailableCourses] = useState<string[]>([]);
+  const [enrollmentLoading, setEnrollmentLoading] = useState(false);
+  const [enrollmentMessage, setEnrollmentMessage] = useState('');
+  const [enrollmentError, setEnrollmentError] = useState('');
+  const [selectedForEnrollment, setSelectedForEnrollment] = useState<Set<string>>(new Set());
+  const [bulkEnrollInput, setBulkEnrollInput] = useState('');
+
   const itemsPerPage = 5;
 
   useEffect(() => {
@@ -177,8 +189,14 @@ const StudentManagementPage: React.FC = () => {
 
   const handleDelete = async (index: string) => {
     setNotice('');
-    if (window.confirm(`Are you sure you want to delete student ${index}?`)) {
+    if (window.confirm(`Are you sure you want to delete student ${index}? This will also remove their face from recognition.`)) {
       try {
+        // Delete face from AWS Rekognition first (non-fatal if it fails)
+        try {
+          await deleteRekognitionFaceByStudentId(index);
+        } catch (faceErr) {
+          console.warn('Failed to delete Rekognition face for student', index, faceErr);
+        }
         await deleteStudent(index);
         await loadStudents();
       } catch {
@@ -189,10 +207,16 @@ const StudentManagementPage: React.FC = () => {
 
   const handleBulkDelete = async () => {
     setNotice('');
-    if (window.confirm(`Are you sure you want to delete ${selectedIndices.size} students?`)) {
+    if (window.confirm(`Are you sure you want to delete ${selectedIndices.size} students? This will also remove their faces from recognition.`)) {
       setLoading(true);
       try {
         for (const index of Array.from(selectedIndices)) {
+          // Delete face from AWS Rekognition first (non-fatal)
+          try {
+            await deleteRekognitionFaceByStudentId(index);
+          } catch (faceErr) {
+            console.warn('Failed to delete Rekognition face for student', index, faceErr);
+          }
           await deleteStudent(index);
         }
         await loadStudents();
@@ -205,10 +229,17 @@ const StudentManagementPage: React.FC = () => {
   };
 
   const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const allIndices = filteredStudents.map(s => s.index);
     if (e.target.checked) {
-      setSelectedIndices(new Set(filteredStudents.map(s => s.index)));
+      setSelectedIndices(new Set(allIndices));
+      if (courseEnrollmentTab && enrollmentCourseCode) {
+        setSelectedForEnrollment(new Set(allIndices));
+      }
     } else {
       setSelectedIndices(new Set());
+      if (courseEnrollmentTab && enrollmentCourseCode) {
+        setSelectedForEnrollment(new Set());
+      }
     }
   };
 
@@ -220,6 +251,17 @@ const StudentManagementPage: React.FC = () => {
       newSelected.add(index);
     }
     setSelectedIndices(newSelected);
+
+    // Also track for course enrollment if the tab is open
+    if (courseEnrollmentTab && enrollmentCourseCode) {
+      const enrollSelected = new Set(selectedForEnrollment);
+      if (enrollSelected.has(index)) {
+        enrollSelected.delete(index);
+      } else {
+        enrollSelected.add(index);
+      }
+      setSelectedForEnrollment(enrollSelected);
+    }
   };
 
   const filteredStudents = students.filter(student => 
@@ -359,6 +401,95 @@ const StudentManagementPage: React.FC = () => {
     setSyncingAllFaces(false);
   };
 
+  // ── Course Enrollment Functions ──
+
+  const loadEnrolledStudents = async (courseCode: string) => {
+    if (!courseCode) { setEnrolledStudents([]); return; }
+    setEnrollmentLoading(true);
+    setEnrollmentError('');
+    try {
+      const data = await fetchCourseEnrollments(courseCode);
+      setEnrolledStudents(Array.isArray(data) ? data : []);
+    } catch (err: any) {
+      setEnrollmentError(err.message || 'Failed to load enrolled students');
+      setEnrolledStudents([]);
+    }
+    setEnrollmentLoading(false);
+  };
+
+  const loadAvailableCourses = async () => {
+    try {
+      const courses = await fetchEnrolledCourses();
+      setAvailableCourses(courses);
+    } catch { /* ignore */ }
+  };
+
+  const handleEnrollStudents = async () => {
+    if (!enrollmentCourseCode || selectedForEnrollment.size === 0) {
+      setEnrollmentError('Select a course code and at least one student.');
+      return;
+    }
+    setEnrollmentLoading(true);
+    setEnrollmentError('');
+    setEnrollmentMessage('');
+    try {
+      const result = await assignStudentsToCourse(enrollmentCourseCode, Array.from(selectedForEnrollment));
+      setEnrollmentMessage(`Added ${result.added} student(s) to ${enrollmentCourseCode}.${result.skipped > 0 ? ` Skipped ${result.skipped} (already enrolled or not found).` : ''}`);
+      setSelectedForEnrollment(new Set());
+      await loadEnrolledStudents(enrollmentCourseCode);
+      await loadAvailableCourses();
+    } catch (err: any) {
+      setEnrollmentError(err.message || 'Failed to enroll students');
+    }
+    setEnrollmentLoading(false);
+  };
+
+  const handleRemoveEnrolled = async (studentIds: string[]) => {
+    if (!enrollmentCourseCode) return;
+    setEnrollmentLoading(true);
+    setEnrollmentError('');
+    setEnrollmentMessage('');
+    try {
+      const result = await removeStudentsFromCourse(enrollmentCourseCode, studentIds);
+      setEnrollmentMessage(`Removed ${result.removed} student(s) from ${enrollmentCourseCode}.`);
+      await loadEnrolledStudents(enrollmentCourseCode);
+      await loadAvailableCourses();
+    } catch (err: any) {
+      setEnrollmentError(err.message || 'Failed to remove students');
+    }
+    setEnrollmentLoading(false);
+  };
+
+  const handleBulkEnroll = async () => {
+    if (!enrollmentCourseCode || !bulkEnrollInput.trim()) {
+      setEnrollmentError('Enter a course code and student IDs.');
+      return;
+    }
+    const ids = bulkEnrollInput
+      .split(/[,\n\s]+/)
+      .map(id => id.trim())
+      .filter(id => id.length > 0);
+    if (ids.length === 0) {
+      setEnrollmentError('No valid student IDs found.');
+      return;
+    }
+    setEnrollmentLoading(true);
+    setEnrollmentError('');
+    setEnrollmentMessage('');
+    try {
+      const result = await assignStudentsToCourse(enrollmentCourseCode, ids);
+      setEnrollmentMessage(`Added ${result.added} student(s).${result.skipped > 0 ? ` Skipped ${result.skipped}.` : ''}`);
+      setBulkEnrollInput('');
+      await loadEnrolledStudents(enrollmentCourseCode);
+      await loadAvailableCourses();
+    } catch (err: any) {
+      setEnrollmentError(err.message || 'Failed to enroll');
+    }
+    setEnrollmentLoading(false);
+  };
+
+  // ── Render ──
+
   return (
     <div className="page-enter" style={{ minHeight: 'calc(100vh - 68px)', width: '100%' }}>
       <div className="page-container">
@@ -405,6 +536,132 @@ const StudentManagementPage: React.FC = () => {
           </form>
           {error && <div style={{ color: '#FCA5A5', marginTop: '1rem', background: '#7F1D1D', padding: '0.75rem', borderRadius: '12px' }}>{error}</div>}
           {notice && <div style={{ color: '#5EEAD4', marginTop: '1rem', background: '#134E4A', padding: '0.75rem', borderRadius: '12px' }}>{notice}</div>}
+        </div>
+
+        {/* ── Course Enrollment ── */}
+        <div className="card table-card animate-fade-in-up delay-3" style={{ marginTop: '2rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+            <h3 style={{ margin: 0, color: 'var(--accent)', fontSize: '1.3rem' }}>Course Enrollment</h3>
+            <button onClick={() => { setCourseEnrollmentTab(!courseEnrollmentTab); if (!courseEnrollmentTab) loadAvailableCourses(); }} className="btn btn-ghost" style={{ fontSize: '0.85rem' }}>
+              {courseEnrollmentTab ? 'Hide' : 'Manage'}
+            </button>
+          </div>
+          <p style={{ color: 'var(--muted)', fontSize: '0.85rem', marginBottom: '1rem' }}>
+            Assign students to courses. Only enrolled students appear in attendance reports for that course.
+          </p>
+
+          {courseEnrollmentTab && (
+            <>
+              {/* Course Code Selector */}
+              <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: '1.25rem' }}>
+                <div style={{ flex: 1, minWidth: '180px' }}>
+                  <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Course Code</label>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <input
+                      type="text"
+                      value={enrollmentCourseCode}
+                      onChange={e => { setEnrollmentCourseCode(e.target.value.toUpperCase()); setEnrolledStudents([]); }}
+                      placeholder="e.g. CSC101"
+                      className="input"
+                      style={{ flex: 1 }}
+                      list="course-list"
+                    />
+                    <datalist id="course-list">
+                      {availableCourses.map(c => <option key={c} value={c} />)}
+                    </datalist>
+                    <button onClick={() => loadEnrolledStudents(enrollmentCourseCode)} disabled={!enrollmentCourseCode || enrollmentLoading} className="btn btn-secondary" style={{ whiteSpace: 'nowrap' }}>
+                      {enrollmentLoading ? 'Loading...' : 'View Enrolled'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {enrollmentMessage && <div style={{ color: '#5EEAD4', background: '#134E4A', padding: '0.6rem 1rem', borderRadius: '10px', marginBottom: '1rem', fontSize: '0.85rem' }}>{enrollmentMessage}</div>}
+              {enrollmentError && <div style={{ color: '#FCA5A5', background: '#7F1D1D', padding: '0.6rem 1rem', borderRadius: '10px', marginBottom: '1rem', fontSize: '0.85rem' }}>{enrollmentError}</div>}
+
+              {/* Bulk Enroll */}
+              <div style={{ marginBottom: '1.25rem', padding: '1rem', background: 'rgba(255,255,255,0.03)', borderRadius: '12px', border: '1px solid var(--border)' }}>
+                <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Bulk Enroll — Paste student IDs (comma or newline separated)</label>
+                <textarea
+                  value={bulkEnrollInput}
+                  onChange={e => setBulkEnrollInput(e.target.value)}
+                  placeholder="e.g. 10891234, 10895678, 10899876..."
+                  className="input"
+                  rows={3}
+                  style={{ resize: 'vertical', fontFamily: 'monospace', fontSize: '0.85rem' }}
+                />
+                <button onClick={handleBulkEnroll} disabled={enrollmentLoading || !enrollmentCourseCode} className="btn btn-primary" style={{ marginTop: '0.75rem', fontSize: '0.85rem' }}>
+                  {enrollmentLoading ? 'Enrolling...' : 'Bulk Enroll'}
+                </button>
+              </div>
+
+              {/* Enrolled Students List */}
+              {enrollmentCourseCode && (
+                <>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                    <h4 style={{ margin: 0, color: 'var(--text)', fontSize: '1rem' }}>
+                      Enrolled in {enrollmentCourseCode}: <span style={{ color: 'var(--accent)' }}>{enrolledStudents.length}</span> student(s)
+                    </h4>
+                    {enrolledStudents.length > 0 && (
+                      <button onClick={() => handleRemoveEnrolled(enrolledStudents.map((s: any) => s.index_no))} className="btn-outline-action btn-outline-action--danger" style={{ fontSize: '0.8rem' }}>
+                        Remove All
+                      </button>
+                    )}
+                  </div>
+
+                  {enrolledStudents.length > 0 ? (
+                    <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                        <thead>
+                          <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                            <th style={{ padding: '0.5rem 0.75rem', color: 'var(--muted)', fontWeight: 600, textAlign: 'left', fontSize: '0.85rem' }}>Index</th>
+                            <th style={{ padding: '0.5rem 0.75rem', color: 'var(--muted)', fontWeight: 600, textAlign: 'left', fontSize: '0.85rem' }}>Name</th>
+                            <th style={{ padding: '0.5rem 0.75rem', color: 'var(--muted)', fontWeight: 600, textAlign: 'left', fontSize: '0.85rem' }}>Programme</th>
+                            <th style={{ padding: '0.5rem 0.75rem', textAlign: 'right', fontSize: '0.85rem' }}></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {enrolledStudents.map((s: any) => (
+                            <tr key={s.index_no} style={{ borderBottom: '1px solid var(--border)' }}>
+                              <td style={{ padding: '0.5rem 0.75rem', color: 'var(--text)', fontSize: '0.85rem' }}>{s.index_no}</td>
+                              <td style={{ padding: '0.5rem 0.75rem', color: 'var(--text)', fontSize: '0.85rem' }}>{s.name}</td>
+                              <td style={{ padding: '0.5rem 0.75rem', color: 'var(--muted)', fontSize: '0.85rem' }}>{s.programme || '-'}</td>
+                              <td style={{ padding: '0.5rem 0.75rem', textAlign: 'right' }}>
+                                <button onClick={() => handleRemoveEnrolled([s.index_no])} className="btn-outline-action btn-outline-action--danger" style={{ fontSize: '0.75rem', padding: '0.2rem 0.6rem' }}>Remove</button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div style={{ textAlign: 'center', color: 'var(--muted)', padding: '1.5rem', fontSize: '0.85rem' }}>
+                      No students enrolled in {enrollmentCourseCode}. Select students below and click "Enroll Selected".
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* Enroll from Student List */}
+              {enrollmentCourseCode && (
+                <div style={{ marginTop: '1.25rem', padding: '1rem', background: 'rgba(255,182,6,0.04)', borderRadius: '12px', border: '1px solid rgba(255,182,6,0.1)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                    <label style={{ fontWeight: 600, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                      Select students below to enroll in {enrollmentCourseCode}
+                    </label>
+                    {selectedForEnrollment.size > 0 && (
+                      <button onClick={handleEnrollStudents} disabled={enrollmentLoading} className="btn btn-gold" style={{ fontSize: '0.85rem' }}>
+                        Enroll Selected ({selectedForEnrollment.size})
+                      </button>
+                    )}
+                  </div>
+                  <p style={{ color: 'var(--muted)', fontSize: '0.8rem', marginBottom: '0.5rem' }}>
+                    Check the boxes next to students in the table below to select them for enrollment.
+                  </p>
+                </div>
+              )}
+            </>
+          )}
         </div>
 
         <div className="card table-card animate-fade-in-up delay-3" style={{ marginTop: '2rem' }}>

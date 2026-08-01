@@ -59,11 +59,11 @@ Enhance `index.css` with reusable animation classes:
 - Status messages slide
 - Scanner area pulse
 
-### Phase 8: Monitoring Page
-- Camera feed border glow
-- Alert cards slide-in
-- Risk meter animation
-- Face detection box pulse
+### Phase 8: Monitoring Page ✅
+- Camera feed border glow ✅
+- Alert cards slide-in ✅
+- Risk meter animation ✅
+- Face detection box pulse ✅
 
 ### Phase 9: Reporting Page
 - Stat cards stagger entry

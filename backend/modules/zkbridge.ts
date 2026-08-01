@@ -1,6 +1,6 @@
 // Index: zkInit():70 | zkTerminate():78 | zkGetDeviceCount():87 | zkOpenDevice():91 | zkCloseDevice():107
-//        zkInitDB():111 | zkCapture():122 | zkAddTemplate():148 | zkIdentify():156 | zkLoadTemplates():168
-//        zkClearDB():177 | zkGetCount():181 | zkRemoveTemplate():189 | isDeviceOpen():194 | isDBReady():195
+//        zkInitDB():119 | zkCapture():129 | zkAddTemplate():150 | zkIdentify():163 | zkLoadTemplates():181
+//        zkClearDB():187 | zkGetCount():191 | zkRemoveTemplate():195 | isDeviceOpen():200 | isDBReady():201
 // ponytail: HANDLE = void* on x64; capture = polling loop (non-blocking SDK)
 import koffi from 'koffi';
 
@@ -61,6 +61,7 @@ const MAX_TEMPLATE_SIZE = 2048;
 let hDevice: any = null;
 let hDBCache: any = null;
 let imgSize: number = 300 * 375; // default, queried at open
+let imgW = 300, imgH = 375; // actual sensor dimensions, queried at open
 let initialized = false;
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
@@ -119,8 +120,8 @@ export function zkCloseDevice(): void {
 export function zkInitDB(): boolean {
   hDBCache = ZKFPM_DBInit();
   if (hDBCache == null) return false;
-  ZKFPM_DBSetParameter(hDBCache, 1, 45);
-  ZKFPM_DBSetParameter(hDBCache, 2, 55);
+  ZKFPM_DBSetParameter(hDBCache, 1, 3);   // security level (1-9, 3 = tolerant)
+  ZKFPM_DBSetParameter(hDBCache, 2, 50);  // matching threshold (0-100, higher = more tolerant)
   return true;
 }
 
@@ -162,19 +163,28 @@ export function zkAddTemplate(fid: number, templateBase64: string): boolean {
   if (!hDBCache) throw new Error('DB cache not initialized');
   const blob = Buffer.alloc(MAX_TEMPLATE_SIZE);
   const blobLen = ZKFPM_Base64ToBlob(templateBase64, blob, blob.length);
-  if (blobLen <= 0) return false;
-  return ZKFPM_DBAdd(hDBCache, fid, blob.subarray(0, blobLen), blobLen) === 0;
+  if (blobLen <= 0) {
+    console.log(`[ZK] zkAddTemplate fid=${fid} FAILED: Base64ToBlob returned ${blobLen}`);
+    return false;
+  }
+  const ret = ZKFPM_DBAdd(hDBCache, fid, blob.subarray(0, blobLen), blobLen);
+  console.log(`[ZK] zkAddTemplate fid=${fid} blobLen=${blobLen} DBAdd ret=${ret}`);
+  return ret === 0;
 }
 
 export function zkIdentify(templateBase64: string): { fid: number; score: number } | null {
   if (!hDBCache) throw new Error('DB cache not initialized');
   const blob = Buffer.alloc(MAX_TEMPLATE_SIZE);
   const blobLen = ZKFPM_Base64ToBlob(templateBase64, blob, blob.length);
-  if (blobLen <= 0) return null;
+  if (blobLen <= 0) {
+    console.log('[ZK] zkIdentify FAILED: Base64ToBlob returned 0');
+    return null;
+  }
 
   const fid = Buffer.alloc(4);
   const score = Buffer.alloc(4);
   const ret = ZKFPM_DBIdentify(hDBCache, blob.subarray(0, blobLen), blobLen, fid, score);
+  console.log(`[ZK] zkIdentify blobLen=${blobLen} DBIdentify ret=${ret} fid=${fid.readUInt32LE(0)} score=${score.readUInt32LE(0)}`);
   if (ret !== 0) return null;
 
   return { fid: fid.readUInt32LE(0), score: score.readUInt32LE(0) };
@@ -208,5 +218,4 @@ export function zkRemoveTemplate(fid: number): boolean {
 export function isDeviceOpen(): boolean { return hDevice != null; }
 export function isDBReady(): boolean { return hDBCache != null; }
 
-// ponytail: module-level, file not needed outside this context
-let imgW = 300, imgH = 375;
+

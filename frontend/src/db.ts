@@ -53,6 +53,7 @@ interface ExamSysDB extends DBSchema {
       id?: number;
       studentId?: string;
       courseCode?: string;
+      sessionId?: string;
       date: string;
       time: string;
       result: 'success' | 'failed' | 'duplicate' | 'enrollment';

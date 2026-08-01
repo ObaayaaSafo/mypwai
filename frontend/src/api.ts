@@ -2,119 +2,177 @@ import { initDB, persistDBBackup } from './db';
 
 const hasPhoto = (photo?: string | null) => typeof photo === 'string' && photo.trim().length > 0;
 
-const attendanceBases = [
-  `${window.location.protocol}//${window.location.hostname}:4000/api/attendance`,
-  'http://127.0.0.1:4000/api/attendance',
-  'http://localhost:4000/api/attendance',
+const apiBases = [
+  'https://wifi-viscosity-overhear.ngrok-free.dev/api',
+  '/api',
+  `${window.location.protocol}//${window.location.hostname}:4007/api`,
+  'http://127.0.0.1:4007/api',
+  'http://localhost:4007/api',
+  `${window.location.protocol}//${window.location.hostname}:4000/api`,
+  'http://127.0.0.1:4000/api',
+  'http://localhost:4000/api',
 ];
 
-const requestAttendance = async (path: string, init?: RequestInit) => {
+const attendanceBases = apiBases.map(b => `${b}/attendance`);
+const studentBases = apiBases.map(b => `${b}/students`);
+
+const tryFetch = async (bases: string[], path: string, init?: RequestInit) => {
   let lastError: Error | null = null;
-  for (const base of attendanceBases) {
+  for (const base of bases) {
     try {
-      // Add a timeout so the request doesn't hang indefinitely when MySQL is slow
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+      const headers: Record<string, string> = {
+        ...((init?.headers as Record<string, string>) || {}),
+        'ngrok-skip-browser-warning': 'true',
+      };
 
       const response = await fetch(`${base}${path}`, {
         ...init,
+        headers,
         signal: controller.signal,
       });
 
       clearTimeout(timeoutId);
 
       if (!response.ok) {
-        throw new Error(`Attendance API failed with status ${response.status}`);
+        throw new Error(`API failed with status ${response.status}`);
       }
       return response;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error('Network request failed');
     }
   }
-  throw lastError || new Error('Unable to reach backend attendance API');
+  throw lastError || new Error('Unable to reach backend API');
 };
 
+const requestAttendance = async (path: string, init?: RequestInit) => tryFetch(attendanceBases, path, init);
+const requestStudents = async (path: string, init?: RequestInit) => tryFetch(studentBases, path, init);
+
 export const fetchStudents = async () => {
+  // Try dedicated /api/students endpoint first, fall back to /api/attendance/students for backward compat
   try {
-    const response = await requestAttendance('/students');
+    const response = await requestStudents('');
     const students = await response.json();
     if (!Array.isArray(students)) return [];
-    // normalize backend fields (index_no, photo_url, fingerprint_enrolled, face_enrolled)
     return students.map((s: any) => ({
       index: s.index_no || s.index || '',
       name: s.name,
-      programme: s.programme,
-      level: s.level,
+      programme: s.programme || '',
+      level: s.level || '',
       fingerprintEnrolled: s.fingerprintEnrolled ?? s.fingerprint_enrolled ?? false,
       faceEnrolled: s.faceEnrolled ?? s.face_enrolled ?? hasPhoto(s.photo ?? s.photo_url),
       photo: s.photo ?? s.photo_url ?? null,
     }));
   } catch {
-    const db = await initDB();
-    const students = await db.getAll('students');
-    return students.map((student: any) => ({
-      ...student,
-      faceEnrolled: student.faceEnrolled ?? student.face_enrolled ?? hasPhoto(student.photo),
-    }));
+    try {
+      const response = await requestAttendance('/students');
+      const students = await response.json();
+      if (!Array.isArray(students)) return [];
+      return students.map((s: any) => ({
+        index: s.index_no || s.index || '',
+        name: s.name,
+        programme: s.programme || '',
+        level: s.level || '',
+        fingerprintEnrolled: s.fingerprintEnrolled ?? s.fingerprint_enrolled ?? false,
+        faceEnrolled: s.faceEnrolled ?? s.face_enrolled ?? hasPhoto(s.photo ?? s.photo_url),
+        photo: s.photo ?? s.photo_url ?? null,
+      }));
+    } catch {
+      // Offline fallback: load from IndexedDB
+      const db = await initDB();
+      const students = await db.getAll('students');
+      return students.map((student: any) => ({
+        ...student,
+        faceEnrolled: student.faceEnrolled ?? student.face_enrolled ?? hasPhoto(student.photo),
+      }));
+    }
   }
 };
 
 export const addStudent = async (student: any) => {
-  try {
-    // convert to backend field names
-    const payload = {
-      index_no: student.index,
-      name: student.name,
-      programme: student.programme,
-      level: student.level,
-      fingerprint_enrolled: student.fingerprintEnrolled ?? false,
-      face_enrolled: student.faceEnrolled ?? hasPhoto(student.photo),
-      photo_url: student.photo ?? null,
-    };
+  const payload: any = {
+    index: student.index,
+    index_no: student.index,
+    name: student.name,
+    programme: student.programme,
+    level: student.level,
+    photo_url: student.photo ?? null,
+    photo: student.photo ?? null,
+  };
+  // Include biometric flags only when explicitly set (so backend doesn't reset them)
+  if ('faceEnrolled' in student) payload.faceEnrolled = student.faceEnrolled;
+  if ('fingerprintEnrolled' in student) payload.fingerprintEnrolled = student.fingerprintEnrolled;
 
-    const response = await requestAttendance('/students', {
+  // Try dedicated /api/students first, fall back to /api/attendance/students
+  try {
+    const response = await requestStudents('', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
     const resJson = await response.json();
     return resJson;
-  } catch {
-    const db = await initDB();
-    const existing = await db.get('students', student.index);
-    const fingerprintEnrolled = student.fingerprintEnrolled ?? (existing ? existing.fingerprintEnrolled : false);
-    const faceEnrolled = Boolean(student.faceEnrolled ?? (existing ? existing.faceEnrolled : false)) || hasPhoto(student.photo ?? existing?.photo);
-    const result = await db.put('students', { ...student, fingerprintEnrolled, faceEnrolled });
-    await persistDBBackup();
-    return result;
+  } catch (firstError) {
+    try {
+      const response = await requestAttendance('/students', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const resJson = await response.json();
+      return resJson;
+    } catch {
+      // Both endpoints failed — throw so the caller can show the error
+      // Also save to IndexedDB as offline fallback
+      try {
+        const db = await initDB();
+        const existing = await db.get('students', student.index);
+        const fingerprintEnrolled = student.fingerprintEnrolled ?? (existing ? existing.fingerprintEnrolled : false);
+        const faceEnrolled = Boolean(student.faceEnrolled ?? (existing ? existing.faceEnrolled : false)) || hasPhoto(student.photo ?? existing?.photo);
+        await db.put('students', { ...student, fingerprintEnrolled, faceEnrolled });
+        await persistDBBackup();
+      } catch { /* IndexedDB fallback also failed */ }
+      throw firstError instanceof Error ? firstError : new Error('Failed to save student — backend unreachable');
+    }
   }
 };
 
 export const deleteStudent = async (index: string) => {
+  const doLocalCleanup = async () => {
+    try {
+      const db = await initDB();
+      await db.delete('students', index);
+      await persistDBBackup();
+    } catch { /* local cleanup failed — not critical */ }
+  };
+
+  // Try dedicated /api/students first, fall back to /api/attendance/students
   try {
-    const response = await requestAttendance(`/students/${encodeURIComponent(index)}`, {
-      method: 'DELETE',
-    });
-    // backend returns a small json; if empty body, just return true
+    const response = await requestStudents(`/${encodeURIComponent(index)}`, { method: 'DELETE' });
     try {
       const result = await response.json();
-      // IMPORTANT: Also delete from IndexedDB to prevent offlineSync from re-syncing the student
-      const db = await initDB();
-      await db.delete('students', index);
-      await persistDBBackup();
+      await doLocalCleanup();
       return result;
     } catch {
-      // Response was ok but not JSON - also delete from local storage
-      const db = await initDB();
-      await db.delete('students', index);
-      await persistDBBackup();
+      await doLocalCleanup();
       return { success: true };
     }
   } catch {
-    // Backend deletion failed, fall back to local-only deletion
-    const db = await initDB();
-    const result = await db.delete('students', index);
-    await persistDBBackup();
-    return result;
+    try {
+      const response = await requestAttendance(`/students/${encodeURIComponent(index)}`, { method: 'DELETE' });
+      try {
+        const result = await response.json();
+        await doLocalCleanup();
+        return result;
+      } catch {
+        await doLocalCleanup();
+        return { success: true };
+      }
+    } catch {
+      await doLocalCleanup();
+      return { success: true };
+    }
   }
 };
